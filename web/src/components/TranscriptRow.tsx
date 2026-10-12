@@ -15,6 +15,7 @@ import { PictureButton } from "./ChatPictures";
 import { CompactionMarker, ThinkingBlock, ToolCall } from "./ChatActivity";
 import { Markdown, type MarkdownProps } from "./Markdown";
 import { PictureCall } from "./PictureCall";
+import { QuestionRecord } from "./QuestionCard";
 import { ReplyStatsLine } from "./ReplyStats";
 
 function ContextChip({ label, body }: { label: string; body: string }) {
@@ -108,6 +109,8 @@ export const TranscriptRow = memo(function TranscriptRow({
   useLanguage();
   // Worked out once per entry, not for each draw.
   const context = useMemo(() => (item.kind === "user" ? splitContext(item.text) : null), [item]);
+  // An open question is drawn above the message box (see QuestionCard); what is kept here is its record.
+  if (item.kind === "question") return item.state === "open" ? null : <QuestionRecord item={item} enter={enter} />;
   if (item.kind === "user") {
     const { text, blocks } = context!;
     // Nothing but framing: the portal spoke, not a person. Drawing it as

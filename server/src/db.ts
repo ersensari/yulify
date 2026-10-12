@@ -2316,6 +2316,26 @@ export function setExtensionStash(stash: Record<string, unknown>): void {
   putSetting("extension_stash", Object.keys(stash).length ? JSON.stringify(stash) : "");
 }
 
+/** The minutes ask_question waits for an answer; 0, the default, is until it is answered. */
+export const QUESTION_WAIT_MINUTES = [0, 5, 15, 30, 60] as const;
+
+export function questionWaitMinutes(): number {
+  const saved = Number(getSetting("ask_question_wait_minutes"));
+  return (QUESTION_WAIT_MINUTES as readonly number[]).includes(saved) ? saved : 0;
+}
+
+/** Stores one of QUESTION_WAIT_MINUTES; returns undefined for anything else. */
+export function setQuestionWaitMinutes(minutes: unknown): number | undefined {
+  if (typeof minutes !== "number" || !(QUESTION_WAIT_MINUTES as readonly number[]).includes(minutes)) return undefined;
+  putSetting("ask_question_wait_minutes", String(minutes));
+  return minutes;
+}
+
+/** The wait for a question in milliseconds, read when it is asked. */
+export function questionWaitMs(): number {
+  return questionWaitMinutes() * 60_000;
+}
+
 /** Tools that are off unless a conversation says otherwise. */
 export function toolDefaultsOff(): string[] {
   return parseToolsOff(getSetting("tools_off_default"));

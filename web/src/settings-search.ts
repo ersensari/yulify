@@ -32,6 +32,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "general", section: msg("Context"), title: msg("Kept when compacting"), words: "compaction compact keep recent summary kompaktieren zusammenfassung" },
   { tab: "general", section: msg("Routine reports"), title: msg("Routine reports"), words: "routine schedule cron report destination channel bericht" },
   { tab: "tools", title: msg("Default tools"), words: "tools enable disable default on off werkzeuge show_image generate_image edit_image picture images bild bilder" },
+  { tab: "tools", title: msg("Questions from the agent"), words: "ask_question question questions wait timeout answer fragen frage warten antwort" },
   { tab: "images", section: msg("Making and changing pictures"), title: msg("Image generation"), words: "generate make draw picture image model endpoint address api key size openai add-on bild bilder erzeugen generieren bildgenerierung" },
   { tab: "images", section: msg("Making and changing pictures"), title: msg("Image editing"), words: "edit change picture image mask several pictures endpoint model add-on bild bilder bearbeiten bildbearbeitung" },
   { tab: "skills", title: msg("Skills"), words: "skill procedure import repository fähigkeiten" },

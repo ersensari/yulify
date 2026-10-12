@@ -4,6 +4,7 @@ import { interruptCanvasWrites } from "./canvases.js";
 import { eventsRouter } from "./api/events.js";
 import { serveWeb } from "./web-static.js";
 import { clampLevel } from "./pi/model-runtime.js";
+import { ASK_QUESTION_TOOL } from "./pi/ask-question.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
@@ -48,9 +49,12 @@ import {
   setContextLimit,
   setDefaultContextLimit,
   setProjectTools,
+  setQuestionWaitMinutes,
   setSettings,
   setToolDefaultsOff,
   setToolGroupNames,
+  QUESTION_WAIT_MINUTES,
+  questionWaitMinutes,
   shownStoredSettings,
   shownTools,
   toolDefaultsOff,
@@ -562,10 +566,11 @@ app.put("/api/projects/:name/tools", async (req, res) => {
  * layers under it say, which is what this one disagrees with. Shaped like a
  * project's and a chat's, so the page draws them all the same way.
  */
-function layerTools(folder: string, below: string[], exceptions: { off: string[]; on: string[] }) {
+function layerTools(folder: string, below: string[], exceptions: { off: string[]; on: string[] }, unwatched = false) {
   const servers = mcpServerNames();
   return {
-    tools: shownTools(folder).map((tool) => ({
+    // A routine's runs have nobody to ask (see asksQuestions), so its page does not offer the tool.
+    tools: shownTools(folder).filter((tool) => !(unwatched && tool.name === ASK_QUESTION_TOOL && tool.inline)).map((tool) => ({
       ...tool,
       source: toolSource(tool.name, tool.source, servers),
       enabled: toolEnabled(tool.name, below, exceptions),
@@ -631,7 +636,7 @@ app.get("/api/routines/:id/tools", (req, res) => {
   if (!routine) return res.status(404).json({ error: "Not found" });
   if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   if ("error" in routine) return res.status(409).json({ error: routine.error });
-  res.json(layerTools(routine.folder, toolDefaultsFor(routine.folder, null, "routine"), routineTools(routine.slug)));
+  res.json(layerTools(routine.folder, toolDefaultsFor(routine.folder, null, "routine"), routineTools(routine.slug), true));
 });
 
 app.put("/api/routines/:id/tools", async (req, res) => {
@@ -1150,7 +1155,15 @@ app.get("/api/tools", (_req, res) => {
     })),
     off: [...off].sort(),
     names: toolGroupNames(),
+    questionWaitMinutes: questionWaitMinutes(),
   });
+});
+
+/** How long the agent's ask_question waits for an answer: 0 is until it is answered. Read when a question is asked; the Tools page gets it with the tools. */
+app.put("/api/ask-question", (req, res) => {
+  const waitMinutes = setQuestionWaitMinutes(req.body?.waitMinutes);
+  if (waitMinutes === undefined) return res.status(400).json({ error: `waitMinutes must be one of ${QUESTION_WAIT_MINUTES.join(", ")}` });
+  res.json({ waitMinutes });
 });
 
 /** What each package is called here. Everything not named keeps its own name. */

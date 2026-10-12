@@ -585,7 +585,12 @@ export const api = {
       tools: { name: string; source: string; defaultOn: boolean; inline?: true }[];
       off: string[];
       names: Record<string, string>;
+      /** How long ask_question waits for an answer; 0 is until it is answered. */
+      questionWaitMinutes?: number;
     }>("/api/tools"),
+  /** How long the agent's ask_question waits for an answer, in minutes; 0 is until it is answered. */
+  setQuestionWait: (waitMinutes: number) =>
+    json<{ waitMinutes: number }>("/api/ask-question", { method: "PUT", body: JSON.stringify({ waitMinutes }) }),
   /** Which tools are off unless a conversation says otherwise. */
   setToolDefaults: (off: string[]) =>
     json<{ off: string[]; applied: number }>("/api/tools", { method: "PUT", body: JSON.stringify({ off }) }),

@@ -29,6 +29,7 @@ import { activity, buildTranscript, keepItems, type Item, type SentImage } from 
 import { HAS_MERMAID, loadMermaidPlugin } from "../mermaid";
 import { useResolvedTheme } from "../theme";
 import { ComposerBar } from "./ComposerBar";
+import { QuestionCard } from "./QuestionCard";
 import { useChatPictures } from "./ChatPictures";
 import { confirmDialog } from "./ConfirmDialog";
 import { ErrorBoundary, PartFailed } from "./ErrorBoundary";
@@ -759,6 +760,10 @@ export function Chat({
   // Entries that have not changed are the same entries as in the last draw, so that their rows are not drawn again (see TranscriptRow).
   const lastItems = useRef<Item[]>([]);
   const items = useMemo(() => (lastItems.current = keepItems(lastItems.current, buildTranscript(events, { ended }))), [events, ended]);
+  // The agent's questions that are still open, the oldest first, above the message box. One that has just been
+  // answered here is put away at once, before its record comes back on the stream.
+  const [handed, setHanded] = useState<string[]>([]);
+  const asking = items.find((it): it is Extract<Item, { kind: "question" }> => it.kind === "question" && it.state === "open" && !handed.includes(it.questionId));
   // A click on a picture opens it over the chat, not in a tab of its own.
   const pictures = useChatPictures(items, session);
   // What arrived while the chat was open slides in; what was there when it
@@ -1850,6 +1855,21 @@ export function Chat({
           {!loading && running && phase && !statusShownElsewhere && <StatusIndicator phase={phase} />}
         </div>
       </div>
+
+      {!loading && asking && (
+        <div className="px-4 pt-2 sm:px-6">
+          <div className="mx-auto w-full max-w-3xl">
+            <QuestionCard
+              key={asking.questionId}
+              sessionId={session.id}
+              requestId={asking.questionId}
+              title={asking.title}
+              questions={asking.questions}
+              onDone={() => setHanded((ids) => [...ids, asking.questionId])}
+            />
+          </div>
+        </div>
+      )}
 
       <form
         onSubmit={(e) => {

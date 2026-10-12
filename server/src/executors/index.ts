@@ -22,6 +22,10 @@ export interface LaunchOptions {
   sessionFile?: string;
   /** Give this session the routine tools. Channel sessions only. */
   routineTools?: boolean;
+  /** Give this session the ask_question tool. Chats a person talks to in the portal's pages only. */
+  questions?: boolean;
+  /** Whether a dialog an extension opens is shown to a person. Off for a routine, a heartbeat and a channel's chat, where it is answered at once with its no-answer value. */
+  dialogs?: boolean;
   /** The routine being run, when this is a routine session. Enables reporting. */
   routineSlug?: string | null;
   /** Lowest role the conversation serves; decides which context files load. */
@@ -80,6 +84,8 @@ export class HostExecutor implements Executor {
       sessionDir: path.join(this.sessionRoot, opts.sessionId),
       sessionFile: opts.sessionFile,
       routineTools: opts.routineTools,
+      questions: opts.questions,
+      dialogs: opts.dialogs,
       routineSlug: opts.routineSlug,
       role: opts.role,
       sessionId: opts.sessionId,
@@ -189,7 +195,7 @@ export class ContainerExecutor implements Executor {
 
     await removeStoppedRunner(opts.sessionId);
     const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-    return new PiRpcClient(child);
+    return new PiRpcClient(child, opts.dialogs);
   }
 
   async cleanup(sessionId: string): Promise<void> {

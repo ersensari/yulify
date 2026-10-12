@@ -28,9 +28,10 @@ import { findSessionFile } from "./session-file.js";
 import { CONTEXT_FILES, SHARED_FILES } from "./context-files.js";
 import { heartbeatTool } from "./heartbeat-tool.js";
 import { askPrimaryTool } from "./ask-primary.js";
+import { ASK_QUESTION_SOURCE, askQuestionTool } from "./ask-question.js";
 import { proxyBaseUrl } from "../llama-progress.js";
 import { bridgeSubagents, SUBAGENT_INPUT, SUBAGENT_STOP, type Bridge } from "../subagent-protocol.js";
-import { contextWindowFor, getSkipThinkingProviders, getVoiceInstructions, getVoiceModel, portalBrowserOn, voiceSpeaks } from "../db.js";
+import { contextWindowFor, getSkipThinkingProviders, getVoiceInstructions, getVoiceModel, portalBrowserOn, questionWaitMs, voiceSpeaks } from "../db.js";
 import { configStamp, isLlamaProvider } from "../providers.js";
 import { rereadConfig } from "./model-runtime.js";
 import { UNDERSTORY_RULE } from "../features.js";
@@ -309,6 +310,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
   private loader?: { appendedByPi(): string };
   /** Dialogs an extension is waiting on, keyed by request id. */
   private pendingUi = new Map<string, (r: { cancelled?: boolean; value?: unknown }) => void>();
+  /** Whether a dialog is shown to a person. Where nobody can answer, it is answered at once with its no-answer value. */
+  private dialogs = true;
+  /** The same dialogs as they were sent, for a page that opens later, and how to close each from the run's side. */
+  private openDialogs = new Map<string, { request: Record<string, unknown>; close: () => void }>();
   /** The chat box's text, kept by the portal: see useDrafts. */
   private drafts?: DraftStore;
 
@@ -374,6 +379,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
      * through a channel should be able to touch the schedule.
      */
     routineTools?: boolean;
+    /** Register ask_question: only for a chat a person talks to in the portal's pages (see asksQuestions). */
+    questions?: boolean;
+    /** Show the dialogs an extension opens (default); off where nobody can answer them (see showsDialogs). */
+    dialogs?: boolean;
     /**
      * The routine this session runs, when it is one. Gives the agent the report
      * tool, so a run with nobody watching can still reach someone.
@@ -462,6 +471,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       if (editTool) factories.push({ name: EDIT_IMAGE_SOURCE, factory: editTool.extension });
       if (opts.routineTools)
         factories.push({ name: "routines", factory: routineTools(opts.sessionId) });
+      if (opts.questions) factories.push({ name: ASK_QUESTION_SOURCE, factory: askQuestionTool(questionWaitMs) });
       // Only where it means something: a conversation with the primary user has
       // nobody to escalate to, and the tool would just be noise.
       if (opts.sessionId && opts.role && opts.role !== "primary") {
@@ -570,6 +580,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const client = new SdkPiClient(session, modelRuntime, () => {});
     switchedOff = () => client.switchedOff;
     client.portalSessionId = opts.sessionId;
+    client.dialogs = opts.dialogs !== false;
     client.rememberChatModel = opts.rememberChatModel;
     client.canvases = canvases;
     if (eventBus && resourceLoader) {
@@ -688,32 +699,43 @@ export class SdkPiClient extends EventEmitter implements PiClient {
   private buildUiContext() {
     const ask = (payload: Record<string, unknown>, opts: any, fallback: unknown) =>
       new Promise((resolve) => {
+        // Nobody to answer (a routine, a heartbeat, a channel's chat): not shown anywhere, and nothing waits.
+        if (!this.dialogs || opts?.signal?.aborted) { resolve(fallback); return; }
         const id = randomUUID();
         let settled = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
-        const abort = () => finish(fallback);
         const finish = (value: unknown) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          opts?.signal?.removeEventListener?.("abort", abort);
+          opts?.signal?.removeEventListener?.("abort", stop);
           this.pendingUi.delete(id);
+          this.openDialogs.delete(id);
           resolve(value);
         };
+        // Ended from the run's side (its wait is up, or it is stopped): the pages still showing it close it.
+        // One answered or cancelled on a page is dropped by that page. The reason is for the record a question
+        // of ask_question keeps in the chat (see questions.ts).
+        const close = (reason: "expired" | "stopped") => {
+          if (settled) return;
+          this.emit("event", { type: "extension_ui_cancel", id, reason });
+          finish(fallback);
+        };
+        const stop = () => close("stopped");
         this.pendingUi.set(id, (r) => finish(r.cancelled ? fallback : r.value));
 
-        // Never park forever — an unanswered dialog would wedge the session.
-        const ms = typeof opts?.timeout === "number" ? opts.timeout : 300_000;
-        timer = setTimeout(() => {
-          if (settled) return;
-          this.emit("event", { type: "extension_ui_cancel", id });
-          finish(fallback);
-        }, ms);
-        if (typeof timer.unref === "function") timer.unref();
-        opts?.signal?.addEventListener?.("abort", abort, { once: true });
-        if (opts?.signal?.aborted) { abort(); return; }
+        // A dialog waits until it is answered, cancelled or the run is stopped. Only a caller that names
+        // a wait (pi's `timeout` option, the question tool's setting) gets one.
+        const ms = typeof opts?.timeout === "number" ? opts.timeout : 0;
+        if (ms > 0) {
+          timer = setTimeout(() => close("expired"), ms);
+          if (typeof timer.unref === "function") timer.unref();
+        }
+        opts?.signal?.addEventListener?.("abort", stop, { once: true });
 
-        this.emit("event", { type: "extension_ui_request", id, ...payload });
+        const request = { type: "extension_ui_request", id, ...payload };
+        this.openDialogs.set(id, { request, close: stop });
+        this.emit("event", request);
       });
 
     const fireAndForget = (payload: Record<string, unknown>) =>
@@ -728,6 +750,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         ask({ method: "input", title, placeholder }, opts, undefined),
       editor: (title: string, content: string, opts?: any) =>
         ask({ method: "editor", title, defaultValue: content }, opts, undefined),
+      // The portal's own, beside pi's: several questions at once, drawn in the chat. See ask-question.ts. When its
+      // wait ends goes with it, so that a question kept over a restart of the portal still ends then.
+      questions: (payload: { title?: string; questions: unknown[] }, opts?: any) =>
+        ask({ method: "questions", ...payload, ...(opts?.timeout > 0 ? { until: Date.now() + opts.timeout } : {}) }, opts, undefined),
       notify: (message: string, type?: string) =>
         fireAndForget({ method: "notify", message, notifyType: type }),
       setStatus: (key: string, text: string) =>
@@ -784,6 +810,15 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       getToolsExpanded: () => false,
       setToolsExpanded: () => {},
     };
+  }
+
+  /**
+   * The dialogs (confirm, select, input, editor, questions) still waiting for an answer, as they were
+   * sent. Live events are not stored, so a page that opens or switches to this chat while one waits
+   * asks for them here.
+   */
+  openDialogRequests(): Record<string, unknown>[] {
+    return [...this.openDialogs.values()].map((d) => d.request);
   }
 
   /** Answer a dialog the UI just resolved. */
@@ -1082,6 +1117,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
   }
 
   async abort(): Promise<void> {
+    // Nobody is to answer the dialogs of a stopped run, and pi's abort waits for a tool that is waiting on one.
+    for (const dialog of [...this.openDialogs.values()]) dialog.close();
     // Compaction runs on a controller of its own, so session.abort() stops an
     // agent run and leaves a summarisation going — the one case where Stop
     // looks like it did nothing at all.

@@ -82,6 +82,41 @@ Two keys work from anywhere on the page:
 | `/` | Jump to the message box with the command list open. Not while you are typing somewhere else, where it is a character. It is the [command character](/guide/commands#the-command-character), so it is another key if you chose one |
 | `Esc` | In the message box, **stop the run**, whatever is typed: the words stay in the box, so it costs you nothing. Not while an input method is composing a word, and not while the command list is open, where it closes the list |
 
+## Questions from the agent
+
+When the agent cannot go on without a decision or a fact only you have, it uses
+its `ask_question` tool: its questions appear in the chat, just above the
+message box (not over the page, so the rest of the chat stays usable), and the
+agent waits for your answers. A question is one of four kinds: **choose
+one**, **choose several**, **free text**, or **put the options in order** (best
+first, moved with the arrows; they start in the order the agent listed them,
+and that order only counts as your answer once you have moved something or
+pressed **Keep this order**). A question the agent asks without options is
+answered in free text.
+A choice may also take an answer of your own when the agent allows it, and a
+question marked *optional* may be left empty. **Submit** is available once every
+other question is answered. **Cancel** puts the questions away, and the agent
+is told that you did not answer.
+
+The agent waits for as long as it takes: there is no time limit by default. It
+ends when you answer, when you cancel, or when you press Stop in the message
+box, which also takes the questions away in every window that has them. If you
+would rather the agent carries on by itself after a while, **Settings → Tools →
+Questions from the agent** sets a limit of 5, 15, 30 or 60 minutes. The portal
+keeps a question with its chat until it ends: after a reload, a visit to
+another chat or a restart of the portal it is there again. Answered while the
+portal restarts or after, your answers reach the agent as a new message once the
+portal is back. Once it ends, the chat
+keeps a short record of it where it was asked: each question and your answer,
+or that it was cancelled or not answered in time.
+
+The tool exists wherever you answer in the portal's own pages: in your chats,
+and in the conversations you start on the Agent page. It does not exist in a
+routine, a heartbeat or a chat reached through a channel, where nobody could
+answer in the web UI: there the agent asks in plain text, and the person
+answers with their next message. It is in the tools list like any other, in a
+group named `ask-question`, and can be switched off there.
+
 ## Looking at a picture
 
 The pictures the agent shows with `show_image` are drawn under their tool line,
