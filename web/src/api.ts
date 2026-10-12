@@ -3,6 +3,7 @@ import { samplesWav } from "./voice";
 import type { Host, VoiceChoice } from "../../server/src/voice-engines";
 import type { OrbStyle } from "../../server/src/orb-style";
 import type { OutputFormat } from "../../server/src/image-settings";
+import type { ChatMessage } from "./memory-chat";
 export type SessionStatus = "idle" | "running" | "error" | "interrupted";
 
 export interface Session {
@@ -747,6 +748,15 @@ export const api = {
   clearMemoryLog: () => json<{ health: MemoryHealth }>("/api/memory/clear-log", { method: "POST" }),
   /** Every note gone, the index and log empty: the memory from nothing. */
   wipeMemory: () => json<{ health: MemoryHealth }>("/api/memory/wipe", { method: "POST" }),
+  /** The librarian's answer to a conversation, as the stream it comes in: the caller reads the body. */
+  askLibrarian: async (messages: ChatMessage[], signal: AbortSignal): Promise<Response> => {
+    const res = await send("/api/memory/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages }), signal });
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(body.error || `HTTP ${res.status}`, res.status, body);
+    }
+    return res;
+  },
   setSubagentFeature: (patch: { enabled?: boolean; mode?: SubagentMode; maxParallel?: number; model?: string }) =>
     json<{ subagent: SubagentFeature; reloaded: number; waiting: number }>("/api/features/subagent", {
       method: "PUT",
