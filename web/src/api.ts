@@ -329,6 +329,32 @@ export interface PortalEvent {
 }
 
 /**
+ * Fired when what is installed changed (a package installed, removed, updated
+ * or switched), so the page loads or drops an extension's interface at once:
+ * see extensions/loader.ts.
+ */
+export const EXTENSIONS_CHANGED = "pithagoras:extensions-changed";
+const changesExtensions = <T>(request: Promise<T>): Promise<T> =>
+  request.then((result) => {
+    window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
+    return result;
+  });
+
+/** An installed extension's browser half: where its module is fetched from, and its stylesheet if it has one. */
+export interface ExtensionUi {
+  name: string;
+  version?: string;
+  /** Absent for a package that has only a server half. */
+  entry?: string;
+  style?: string;
+  /** Where its server half's own routes are, when it has one; why it is not running, when it could not be started. */
+  server?: string;
+  serverError?: string;
+  /** The themes its package.json names: colours in place of the portal's own, with no code. See extensions/themes.ts. */
+  themes?: { id: string; name: string; light?: Record<string, string>; dark?: Record<string, string> }[];
+}
+
+/**
  * Fired when the server stops accepting this browser's login — it expired, or
  * the portal restarted without PORTAL_SECRET — so the page can ask for the
  * password again instead of failing every request with "Unauthorized".
@@ -1233,22 +1259,29 @@ export const api = {
   catalog: (q = "", topic?: "provider") =>
     json<{ packages: CatalogPackage[] }>(`/api/packages/catalog?${new URLSearchParams({ q, ...(topic ? { topic } : {}) })}`),
   installPackage: (spec: string) =>
-    json<{ ok: true; output: string }>("/api/packages", {
+    changesExtensions(json<{ ok: true; output: string }>("/api/packages", {
       method: "POST",
       body: JSON.stringify({ spec }),
-    }),
+    })),
   removePackage: (spec: string) =>
-    json<{ ok: true; output: string }>("/api/packages", {
+    changesExtensions(json<{ ok: true; output: string }>("/api/packages", {
       method: "DELETE",
       body: JSON.stringify({ spec }),
-    }),
+    })),
   setExtensionEnabled: (spec: string, enabled: boolean) =>
-    json<{ ok: true; enabled: boolean; reloaded: number; waiting: number }>("/api/extensions/enabled", {
+    changesExtensions(json<{ ok: true; enabled: boolean; reloaded: number; waiting: number }>("/api/extensions/enabled", {
       method: "PUT",
       body: JSON.stringify({ spec, enabled }),
-    }),
+    })),
   updatePackages: () =>
-    json<{ ok: true; output: string }>("/api/packages/update", { method: "POST" }),
+    changesExtensions(json<{ ok: true; output: string }>("/api/packages/update", { method: "POST" })),
+  /** The installed extensions that bring an interface: see extensions/loader.ts. */
+  extensionUi: () => json<{ extensions: ExtensionUi[] }>("/api/extension-ui"),
+  /** What an extension's server half would tell a page that opens the chat now: for a browser half that came into the page later. */
+  extensionOpening: (id: string, extension: string) => json<{ pushes: unknown[] }>(`/api/sessions/${id}/extension-ui?extension=${encodeURIComponent(extension)}`),
+  /** What an extension's browser half says to its own half in a chat: see extensions/channel.ts. */
+  tellExtension: (id: string, extension: string, data: unknown) =>
+    json<{ ok: true }>(`/api/sessions/${id}/extension-ui`, { method: "POST", body: JSON.stringify({ extension, data }) }),
 };
 
 export interface PiModel {

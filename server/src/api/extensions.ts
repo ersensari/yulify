@@ -7,6 +7,8 @@ import { piSettingsPath, readPiSettings, updatePiSettings } from "../pi-settings
 import { extensionStash, setExtensionStash } from "../db.js";
 import { isFiltered, isSwitchedOff, setPackageEnabled, sourceOf } from "../extension-switch.js";
 import { sessions } from "../session-manager.js";
+import { clientHalf, packageThemes, serverHalf, type ClientHalf, type PackageThemes, type ServerHalf } from "../extension-ui.js";
+import { isServing, serverFailure, serversSettled, syncServerHalves } from "../extension-host.js";
 
 const run = promisify(execFile);
 
@@ -199,8 +201,108 @@ export async function switchPackage(spec: string, enabled: boolean): Promise<boo
   return stashed !== undefined;
 }
 
+/**
+ * The halves the portal loads, a browser half into its page and a server half
+ * into its own process: of the packages its own settings install, the ones
+ * switched on. Never a package a folder brings: an agent can write that
+ * folder, and what it put there would run in the page of everyone who opens
+ * the portal, or in the portal itself.
+ */
+async function halves(): Promise<{ clients: ClientHalf[]; servers: ServerHalf[]; themed: PackageThemes[] }> {
+  const settings = readPiSettings();
+  const listed = Array.isArray(settings.packages) ? settings.packages : [];
+  const clients: ClientHalf[] = [];
+  const servers: ServerHalf[] = [];
+  const themed: PackageThemes[] = [];
+  // Two packages under one name: the first is the one, whole. Never one's page with the other's server.
+  const taken = new Set<string>();
+  for (const pkg of await installedPackages(settings)) {
+    if (!pkg.path || (pkg.scope && !/^user/i.test(pkg.scope))) continue;
+    const entry = listed.find((e) => sourceOf(e) === pkg.spec);
+    if (entry === undefined || isSwitchedOff(entry)) continue;
+    const client = clientHalf(pkg.path), server = serverHalf(pkg.path), themes = packageThemes(pkg.path);
+    const name = (client ?? server ?? themes)?.name;
+    if (!name || taken.has(name)) continue;
+    taken.add(name);
+    if (client) clients.push(client);
+    if (server) servers.push(server);
+    if (themes) themed.push(themes);
+  }
+  return { clients, servers, themed };
+}
+
+const clientHalves = async () => (await halves()).clients;
+
+/**
+ * Bring the server halves that run in line with what is installed and switched
+ * on: as the portal starts, and whenever a package is installed, removed,
+ * updated or switched.
+ */
+export async function syncExtensionServers(): Promise<void> {
+  await syncServerHalves((await halves()).servers);
+}
+
+/**
+ * The same, after something else changed which packages there are. That
+ * change was made, whatever becomes of this: where the packages cannot be
+ * listed just now it is said, and the server halves are as they were until
+ * the next change or start.
+ */
+export const followPackages = (): Promise<void> =>
+  syncExtensionServers().catch((e) => console.error("[extensions] could not bring the server halves in line with what is installed:", e));
+
+/** Where a page fetches a file of a package's web folder from. */
+const clientUrl = (half: ClientHalf, file: string) =>
+  `/api/extension-ui/${[...half.name.split("/"), ...file.split("/")].map(encodeURIComponent).join("/")}?v=${half.rev}`;
+
 export function extensionsRouter(): Router {
   const router = express.Router();
+
+  router.get("/extension-ui", async (_req, res) => {
+    try {
+      // What is being started or stopped is waited for: a page is told where a server half's routes are only once they are there.
+      await serversSettled();
+      const { clients, servers, themed } = await halves();
+      const names = [...new Set([...clients, ...servers, ...themed].map((half) => half.name))];
+      res.json({
+        extensions: names.map((name) => {
+          const client = clients.find((half) => half.name === name);
+          const server = servers.find((half) => half.name === name);
+          const themes = themed.find((half) => half.name === name);
+          const failure = server && serverFailure(name);
+          return {
+            name,
+            version: (client ?? server ?? themes)!.version,
+            ...(themes ? { themes: themes.themes } : {}),
+            ...(client ? { entry: clientUrl(client, client.entry) } : {}),
+            ...(client?.style ? { style: clientUrl(client, client.style) } : {}),
+            // Where its server half's own routes are, when it has one that is running.
+            ...(server && isServing(name) ? { server: `/api/x/${name.split("/").map(encodeURIComponent).join("/")}` } : {}),
+            ...(failure ? { serverError: failure } : {}),
+          };
+        }),
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  // A file of a package's web folder. The package's name may have a slash in it (`@scope/name`), so it is found by
+  // what the path starts with.
+  router.get("/extension-ui/*file", async (req, res) => {
+    try {
+      const asked = (req.params as unknown as { file: string[] }).file.join("/");
+      const half = (await clientHalves()).find((h) => asked.startsWith(`${h.name}/`));
+      const file = half ? asked.slice(half.name.length + 1) : "";
+      if (!half || !file) return res.status(404).json({ error: "Not found" });
+      // Asked for by the module's revision, so what a page holds is never stale; checked each time all the same.
+      res.sendFile(file, { root: half.dir, dotfiles: "deny", cacheControl: false, headers: { "Cache-Control": "no-cache" } }, (error) => {
+        if (error && !res.headersSent) res.status(404).json({ error: "Not found" });
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
 
   router.get("/extensions", async (_req, res) => {
     try {
@@ -270,6 +372,7 @@ export function extensionsRouter(): Router {
     try {
       const found = await switchPackage(spec, enabled);
       if (!found) return res.status(404).json({ error: "That package is not installed for this user" });
+      await followPackages();
       const { reloaded, waiting } = await sessions.reloadIdle();
       res.json({ ok: true, enabled, reloaded, waiting });
     } catch (e) {

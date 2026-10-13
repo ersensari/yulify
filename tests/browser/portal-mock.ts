@@ -46,7 +46,7 @@ export type Answer = unknown | Reply | typeof HANG | typeof DONE;
 
 /**
  * What every portal says unless a test says otherwise: signed in without a password, no chats, and the three things the
- * shell asks of every page (the add-on flags, the browser add-on, the voice add-on, the places for a new chat) and of
+ * shell asks of every page (the add-on flags, the browser add-on, the voice add-on, which extensions draw in it, the places for a new chat) and of
  * every chat (what runs in the background, what came before), with nothing set up.
  */
 const portalBase = ({ path, method, url }: Ask): Answer => {
@@ -59,6 +59,7 @@ const portalBase = ({ path, method, url }: Ask): Answer => {
     config: { user: '', hasPassword: false }, version: null, pages: [], uiPort: '', uiExposed: false, uiOutdated: false, cursor: true, allowlist: '', configured: false, byDefault: true, sessions: [], routines: [],
   };
   if (path === '/api/voice') return { enabled: false };
+  if (path === '/api/extension-ui') return { extensions: [] };
   // A portal that is not run from a checkout: nothing to update, no notice.
   if (path === '/api/update') return { kind: 'none', boot: 'boot-a' };
   if (/^\/api\/sessions\/[^/]+\/background$/.test(path)) return { supported: true, jobs: [], statuses: [], widgets: [] };

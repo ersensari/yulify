@@ -30,6 +30,7 @@ import { forgetBrowserSession } from "./browser/tools.js";
 import { BACKGROUND_SUPPORTED, listJobs, startedWhen, type BackgroundJob } from "./background.js";
 import { forgetSession as forgetLlamaProxy } from "./llama-progress.js";
 import { forgetCanvases } from "./canvases.js";
+import { chatEvent, chatLife, extensionHolds, serversSettled, setChatBridge } from "./extension-host.js";
 import { forTranscript } from "./stored-event.js";
 import { buildExecutor, type Executor } from "./executors/index.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
@@ -290,6 +291,8 @@ const EPHEMERAL_EVENTS = new Set([
   "portal_reload",
   // The versions of a chat's messages, which a stream also starts with.
   "portal_versions",
+  // What an extension says to its browser half: the two keep their own state, and a page that opens later asks.
+  "portal_extension_ui",
 ]);
 
 /** How long a chat's pi may go unused before it is let go: see startReaper. */
@@ -536,8 +539,9 @@ class SessionManager extends EventEmitter {
   private record(sessionId: string, type: string, payload: unknown): EventRow | undefined {
     // A status line or a widget describes the chat; nobody is using it. An
     // extension that refreshes one every second kept the idle clock at zero, and
-    // the reaper never let go of the chat.
-    if (type !== "extension_ui_request" || isDialog((payload as { method?: unknown })?.method)) this.touch(sessionId);
+    // the reaper never let go of the chat. What an extension says to its
+    // browser half is the same: said on its own clock, with nobody there.
+    if (type !== "portal_extension_ui" && (type !== "extension_ui_request" || isDialog((payload as { method?: unknown })?.method))) this.touch(sessionId);
     if (EPHEMERAL_EVENTS.has(type)) {
       // Still deliver it to anyone attached right now, with a negative seq so
       // it can never be confused with a stored event during replay.
@@ -1063,6 +1067,20 @@ class SessionManager extends EventEmitter {
     return this.live.get(sessionId)?.client.subagentStop?.(id) ?? false;
   }
 
+  /**
+   * What a page says to an extension's own half in a chat, starting the chat's
+   * pi if it is not running: a panel opened on a chat left alone for a while
+   * still reaches its extension. False where the executor cannot reach the
+   * extensions.
+   */
+  async tellExtension(sessionId: string, extension: string, data: unknown): Promise<boolean> {
+    // Asked before pi is started: where it runs in a container there is nobody to tell, and a container
+    // started only to find that out would be left running.
+    if (EXECUTOR_KIND !== "host") return false;
+    const client = await this.ensureClient(sessionId);
+    return client.tellExtension?.(extension, data) ?? false;
+  }
+
   /** The session's model is being loaded, or has finished loading. */
   reportModelLoad(sessionId: string, load: unknown): void {
     this.record(sessionId, "portal_model", load);
@@ -1106,6 +1124,8 @@ class SessionManager extends EventEmitter {
   }
 
   private async startClient(sessionId: string): Promise<PiClient> {
+    // What the installed extensions' server halves add to a chat's pi is added as it loads: they are started first.
+    await serversSettled();
     // The pi that was let go still has its extensions winding down, on the same
     // conversation file: the next one starts after them.
     await this.releasing.get(sessionId);
@@ -1212,6 +1232,8 @@ class SessionManager extends EventEmitter {
       // A client stopped for an edit or a restart can still have a settle in
       // hand; it speaks for a conversation that is no longer this one.
       if (this.stopping.has(client)) return;
+      // The installed extensions' server halves hear all of it, as it is said.
+      chatEvent(sessionId, msg);
       rememberSessionFile();
       // A run the portal started failed after pi had accepted it. Said here,
       // before its agent_settled, so an ask() waiting on it fails instead of
@@ -1373,6 +1395,7 @@ class SessionManager extends EventEmitter {
     // put it there, and a send from the box finds it.
     client.useDrafts?.({ get: () => this.drafts.get(sessionId), set: (text, caret) => this.setDraft(sessionId, text, caret) });
     this.live.set(sessionId, { client, executor });
+    chatLife("started", sessionId);
     this.touch(sessionId);
 
     return client;
@@ -1482,6 +1505,8 @@ class SessionManager extends EventEmitter {
       this.commandsInHand.has(sessionId) ||
       this.calls.has(sessionId) ||
       this.backgroundWork(sessionId) ||
+      // An extension's server half asked for this chat's pi to be kept while work of its own goes on.
+      extensionHolds(sessionId) ||
       client.isIdle?.() === false ||
       (client.dialogsOpen?.() ?? 0) > 0
     );
@@ -2829,7 +2854,7 @@ class SessionManager extends EventEmitter {
       [...this.live.entries()].map(async ([sessionId, { client }]) => {
         // A subagent in the background would be stopped by the reload: its
         // chat is idle, and still working.
-        if (this.isBusy(sessionId) || this.compacting.has(sessionId) || this.editing.has(sessionId) || this.backgroundWork(sessionId)) {
+        if (this.isBusy(sessionId) || this.compacting.has(sessionId) || this.editing.has(sessionId) || this.backgroundWork(sessionId) || extensionHolds(sessionId)) {
           waiting++;
           return false;
         }
@@ -2971,6 +2996,7 @@ class SessionManager extends EventEmitter {
 
   /** pi is gone, and what it was holding with it. */
   private forgetPi(sessionId: string): void {
+    chatLife("stopped", sessionId);
     this.activity.delete(sessionId);
     this.dropCommands(sessionId);
     // No memory tool of its is running any more, whatever it last said.
@@ -3046,6 +3072,7 @@ class SessionManager extends EventEmitter {
     this.aborts.delete(sessionId);
     // Its temporary canvases are in memory only, so no row delete reaches them.
     forgetCanvases(sessionId);
+    chatLife("deleted", sessionId);
     // Each on its own: pi's folder is the one that can refuse, and the pictures
     // are what would then stay downloadable.
     for (const [what, remove] of [
@@ -3115,4 +3142,5 @@ class SessionManager extends EventEmitter {
 }
 
 export const sessions = new SessionManager();
+setChatBridge({ tell: (chatId, extension, data) => sessions.tellExtension(chatId, extension, data) });
 export { SESSION_ROOT, IMAGE_ROOT };
