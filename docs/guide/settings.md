@@ -7,7 +7,7 @@ German. Navigation runs down the left edge, in four groups:
 | Group | Pages |
 | --- | --- |
 | **Models** | **Providers** — where models come from, see [Models and providers](/guide/models); **Defaults** — model, effort and context for new chats |
-| **Agent** | **Tools**, **Images**, **Skills**, **MCP**, **Extensions** |
+| **Agent** | **Tools**, **Media**, **Skills**, **MCP**, **Extensions** |
 | **Reach** | **Channels**, **People** |
 | **Portal** | **This browser**, **Authentication**, **Add-ons**, **Shortcuts**, **Logs**, **About** (with **Update**), **Advanced** |
 
@@ -73,13 +73,26 @@ that, a session asking for a local model silently started on pi's fallback.
 switches the agent's procedures, see [Skills](/guide/skills). **MCP** manages MCP servers, see
 [MCP servers](/guide/mcp).
 
-**Images** holds the image endpoint behind generation and editing, including the maximum picture size of an edit, and the
-switches for **Image generation**, **Image editing**, **Several pictures per edit** and **Stable Diffusion extra settings**, see
+**Media** has two sections, **Image model** and **Video model**. Each has its **switches** at the top, always in view,
+and under them a heading with a line under it, which opens and closes the section with a click; what opens is directly
+under the heading. The line says what the section is for
+while it is open, and the address and model while it is closed. A model that is not set up starts open, to show its
+address; one that is set up starts closed, and what you open or close is kept in this browser. A section with something
+typed in it and not saved stays open, and the search of Settings opens the section, or the group in it, that it finds.
+
+**Image model** holds the image endpoint behind generation and editing, including the maximum picture size of an edit, and the
+switches for **Image generation** and **Image editing** (always in view), and **Several pictures per edit** and **Stable Diffusion extra settings** (under **More options**). The image endpoint is in the section; **Editing endpoint**, a group of its own that opens and closes, holds the address, key, model and maximum size for editing, which are empty when editing uses the image endpoint. See
 [Opt-in features](/guide/features#image-generation). The first two switch the feature on or off as a whole: the
-[Images page](/guide/images) and the existence of the tools. Whether a chat's agent gets the tools,
-`show_image`, `generate_image` and `edit_image`, is set only in the Tools list, where they are together in one **Images** group. **Stable Diffusion extra settings** (off by default) is
-for an endpoint that is a stable-diffusion.cpp server: it lets the Images page offer and send the settings only that server
-reads, see [Images](/guide/images#stable-diffusion-settings). The tools do not use it.
+[Media page](/guide/media) and the existence of the tools. Whether a chat's agent gets the tools,
+`show_image`, `generate_image` and `edit_image`, is set only in the Tools list, where they are together in one **Media** group, with the video tools. **Stable Diffusion extra settings** (off by default) is
+for an endpoint that is a stable-diffusion.cpp server: it lets the Media page offer and send the settings only that server
+reads, see [Media](/guide/media#stable-diffusion-settings). The tools do not use it.
+
+**Video model** holds the video endpoint behind video generation: its address, key, model, size, frames and frame rate, the time
+limit, the disk limit, and the switch for **Video generation**, see
+[Opt-in features](/guide/features#video-generation). The switch turns the feature on or off as a whole: the
+[Media page](/guide/media) and the existence of the tools. Whether a chat's agent gets the tools, `generate_video` and
+`show_video`, is set only in the Tools list, in the same **Media** group.
 
 ## Channels
 
