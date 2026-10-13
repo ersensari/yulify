@@ -28,6 +28,7 @@ import type { ImageContent } from "../prompt-images.js";
 import { routineTools } from "./routine-tools.js";
 import { reportTool, reportToFor } from "./report-tool.js";
 import { guardExtension } from "./guard.js";
+import { CODEMODE_TOOLS, codemodeExtension } from "./codemode.js";
 import { findSessionFile } from "./session-file.js";
 import { CONTEXT_FILES, SHARED_FILES } from "./context-files.js";
 import { heartbeatTool } from "./heartbeat-tool.js";
@@ -461,6 +462,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       voiceSpeaks,
     );
     const canvases = opts.sessionId ? new CanvasTools(opts.sessionId) : undefined;
+    // Code mode, active from the start and switched like any other tool: off by default (see codemode.ts).
+    const codemode = codemodeExtension(pi);
     try {
       // Both are required: the constructor resolves each and throws on
       // undefined, which previously left every session with no extensions.
@@ -469,7 +472,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       const skillsOf = agentFor(opts.cwd);
       // Every session, unconditionally: the point is to limit what a turn can do
       // after it reads something untrusted, and any session can read something.
-      const factories: { name: string; factory: (pi: any) => void }[] = [
+      const factories: { name: string; factory: (pi: any) => void; replaceable?: boolean }[] = [
         { name: "voice-first", factory: voiceFirst.extension },
         // After a model switch, the earlier model's thinking is not handed on as answer text: see #60.
         { name: "cross-model-thinking", factory: crossModelThinkingExtension },
@@ -516,6 +519,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       if (opts.sessionId && portalBrowserOn()) {
         factories.push({ name: "browser", factory: browserTools(opts.sessionId) });
       }
+      if (codemode) factories.push(codemode);
       // A heartbeat's way of saying what it found: it can do nothing else.
       if (opts.heartbeatAgent && opts.sessionId) {
         factories.push({ name: "heartbeat", factory: heartbeatTool(opts.heartbeatAgent, opts.sessionId) });
@@ -605,6 +609,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       sessionManager,
       modelRuntime,
       ...(resourceLoader ? { resourceLoader, settingsManager } : {}),
+      // Added to pi's default tools, not in place of them; the switches take it out again where it is off.
+      ...(resourceLoader && codemode ? { tools: CODEMODE_TOOLS } : {}),
       ...(model ? { model } : {}),
       ...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
     });
@@ -1420,6 +1426,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     } catch {
       this.wanted = new Set();
     }
+    this.keepSwitchedOffFromScripts(session);
     session._setActiveTools = (names: string[]) => {
       const held = this.heldBack(session, names, this.fromExtension);
       this.wanted = new Set([...names, ...held]);
@@ -1441,6 +1448,20 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       }
     };
     this.hearExtensions(session);
+  }
+
+  /**
+   * Take what is switched off out of what a script can call.
+   *
+   * pi lets a script call every tool that is registered for scripts (`exposure: "codemode"` or `"deferred"`), active or
+   * not, and tells the model about them in the description of `codemode`; a script lists them as `ALL_TOOLS`. Taking a
+   * tool out of the active tools, which is all a switch does, leaves that open. So the tools a script can call are the
+   * ones pi says less those switched off: out of the description and the list, and not found when called.
+   */
+  private keepSwitchedOffFromScripts(session: any): void {
+    if (typeof session?._getCallableTools !== "function") return;
+    const original = session._getCallableTools.bind(session) as (...args: unknown[]) => any[];
+    session._getCallableTools = (...args: unknown[]) => original(...args).filter((tool) => !this.switchedOff.has(String(tool?.name)));
   }
 
   /** True while an extension's `setActiveTools` is being carried out. */
@@ -1545,18 +1566,22 @@ export class SdkPiClient extends EventEmitter implements PiClient {
    * path pi tracks it by, so the list groups the way somebody thinks about it
    * — "the web search one", not four unrelated rows. A tool pi leaves inactive
    * is not listed: a tick beside something the model cannot call is a state
-   * the session is not in.
+   * the session is not in. Except one registered for scripts only, which pi
+   * never activates and a code mode script can call: listed, or there would
+   * be no way to switch it off.
    */
   async getTools(): Promise<PiTool[]> {
     const all: any[] = this.session.getAllTools?.() ?? [];
+    const forScripts = (tool: any) => tool.exposure === "codemode" || tool.exposure === "deferred";
     // Not the gateway: it is the portal's way to the lazy tools and no tool to switch.
-    const offered = (this.wanted.size ? all.filter((tool) => this.wanted.has(String(tool.name))) : all).filter((tool) => !this.isGateway(String(tool.name)));
+    const offered = (this.wanted.size ? all.filter((tool) => this.wanted.has(String(tool.name)) || forScripts(tool)) : all).filter((tool) => !this.isGateway(String(tool.name)));
     return offered.map((tool) => ({
       name: String(tool.name),
       description: typeof tool.description === "string" ? tool.description : undefined,
       source: sourceLabel(tool.sourceInfo),
       package: packageOf(tool.sourceInfo),
       ...(isInline(tool.sourceInfo) ? { inline: true as const } : {}),
+      ...(forScripts(tool) ? { scriptsOnly: true as const } : {}),
       enabled: !this.switchedOff.has(String(tool.name)),
     }));
   }
