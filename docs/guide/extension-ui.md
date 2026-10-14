@@ -746,4 +746,6 @@ extension:
 
 Install it from **Settings → Extensions → Discover**, where it is listed under
 **Comes with Pithagoras**. `extensions/theme-dusk` beside it is an extension
-that is only a theme, and is listed there too.
+that is only a theme, and is listed there too. `extensions/docs` is a larger
+one that is still being built: a page in the sidebar, fed by its server half's
+routes ([Documents](/guide/documents)).
