@@ -1,5 +1,6 @@
 import { execFile, spawn, type SpawnOptions } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dockerAvailable, request } from "./extensions/docker.js";
 
 /**
  * How this portal was started, and starting it again.
@@ -31,6 +32,16 @@ export const LAUNCH: Launch = {
 export const RESTART_EXIT = 75;
 let exitStatus = 0;
 export const requestedExit = (): number => exitStatus;
+
+/**
+ * A restart has been asked for and is on its way. An update begun now would be cut off by the stop in the middle of its
+ * merge or install, and leave the portal without the files it starts from, so the update refuses while this is set.
+ */
+let held = false;
+export const restartPending = (): boolean => held;
+export const holdRestart = (on: boolean): void => {
+  held = on;
+};
 
 /**
  * Waits until the old portal is gone (its port and its data are free then), and runs the command in its place. A
@@ -78,18 +89,28 @@ export async function ownService(
   show: (args: string[]) => Promise<string | undefined> = systemctl,
   pids: number[] = ownPids(),
 ): Promise<{ unit: string; user: boolean; restart: string | undefined } | undefined> {
+  const found = await serviceInfo(cgroup, show);
+  if (!found || !found.main || !pids.includes(found.main)) return undefined;
+  return { unit: found.unit, user: found.user, restart: found.restart };
+}
+
+/** The systemd service this process is in the control group of, with its main process and restart policy, whoever its main process is. */
+async function serviceInfo(
+  cgroup: string | undefined,
+  show: (args: string[]) => Promise<string | undefined>,
+): Promise<{ unit: string; user: boolean; main: number; restart: string | undefined } | undefined> {
   const service = serviceOf(cgroup);
   if (!service) return undefined;
   const out = await show([...(service.user ? ["--user"] : []), "show", "--property=MainPID,Restart", service.unit]);
-  const main = Number(/^MainPID=(\d+)$/m.exec(out ?? "")?.[1]);
-  if (!main || !pids.includes(main)) return undefined;
-  return { ...service, restart: /^Restart=(.*)$/m.exec(out ?? "")?.[1]?.trim() };
+  return { ...service, main: Number(/^MainPID=(\d+)$/m.exec(out ?? "")?.[1]), restart: /^Restart=(.*)$/m.exec(out ?? "")?.[1]?.trim() };
 }
 
 export interface RestartPlan {
   mode: RestartMode;
   /** The service the portal is the main process of, where it is. */
   service?: { unit: string; user: boolean; restart: string | undefined };
+  /** The service the portal only runs in the control group of (`both`), whose main process is something else. */
+  group?: { unit: string; user: boolean; restart: string | undefined };
 }
 
 /**
@@ -111,9 +132,13 @@ export async function restartPlan(
   pids?: number[],
 ): Promise<RestartPlan> {
   if (env.PORTAL_UPDATE_RESTART === "self") return { mode: "self" };
-  const service = await ownService(cgroup, show, pids);
+  // One question to systemd answers both: is the portal the unit's own process, and what the unit's policy is.
+  const info = await serviceInfo(cgroup, show ?? systemctl);
+  const own = info && info.main && (pids ?? ownPids()).includes(info.main);
+  const service = own ? { unit: info.unit, user: info.user, restart: info.restart } : undefined;
   if (env.PORTAL_UPDATE_RESTART === "exit" || service) return { mode: "exit", service };
-  return { mode: serviceOf(cgroup) ? "both" : "self" };
+  if (!serviceOf(cgroup)) return { mode: "self" };
+  return { mode: "both", group: info && { unit: info.unit, user: info.user, restart: info.restart } };
 }
 
 /** Restart policies that start a program again that ended with a status other than 0. */
@@ -168,10 +193,13 @@ const real = (): RestartDeps => ({
  * the replacement first, detached, so that it outlives this process, or with the status `RESTART_EXIT` and nothing
  * started, or both (see `restartPlan`).
  *
+ * `forced` is the mode to use instead of the one `restartPlan` finds, for a caller that has decided already (see
+ * `restartSupport`).
+ *
  * Throws, before anything is stopped, when the replacement cannot be started: the old portal stays up.
  */
-export async function restartPortal(launch: Launch = LAUNCH, deps: RestartDeps = real()): Promise<void> {
-  const { mode } = await restartPlan(deps.env, deps.cgroup ?? "", deps.show, deps.pids);
+export async function restartPortal(launch: Launch = LAUNCH, deps: RestartDeps = real(), forced?: RestartMode): Promise<void> {
+  const mode = forced ?? (await restartPlan(deps.env, deps.cgroup ?? "", deps.show, deps.pids)).mode;
   if (mode !== "exit") {
     if (!launch.script) throw new Error("The portal was not started from a file, so it cannot start itself again. Start it again by hand.");
     const child = deps.spawn("sh", ["-c", WAIT_THEN_START, "sh", String(deps.pid), launch.execPath, ...launch.execArgv, launch.script, ...launch.args], {
@@ -190,4 +218,83 @@ export async function restartPortal(launch: Launch = LAUNCH, deps: RestartDeps =
   // Ended with the status that has a manager start it again, wherever one may be; not set when the copy could not be started.
   if (mode !== "self") exitStatus = RESTART_EXIT;
   setTimeout(deps.stop, deps.delayMs);
+}
+
+/** A container: Docker's marker file, or Podman's. */
+const inContainer = (): boolean => existsSync("/.dockerenv") || existsSync("/run/.containerenv");
+
+/**
+ * The restart policy Docker has for this container (`always`, `unless-stopped`, `on-failure`, or `no` / empty for
+ * none), asked over the socket by the container's name; nothing where that cannot be asked (no socket, another name).
+ */
+export async function containerRestartPolicy(env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  const name = env.PORTAL_CONTAINER_NAME || env.HOSTNAME;
+  if (!name || !dockerAvailable()) return undefined;
+  try {
+    const res = await request<{ HostConfig?: { RestartPolicy?: { Name?: string } } }>("GET", `/containers/${encodeURIComponent(name)}/json`, undefined, 3000);
+    return res.status === 200 ? (res.body?.HostConfig?.RestartPolicy?.Name ?? "") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What is there to start the portal again, or why nothing is. */
+export type RestartSupport =
+  | { ok: true; mode: RestartMode; /** What starts it: the words the page and the log use. */ by: "systemd" | "container" | "manager" | "copy" }
+  | { ok: false; code: "unsupervised" | "policy"; message: string };
+
+export interface SupportDeps {
+  env?: NodeJS.ProcessEnv;
+  cgroup?: string | undefined;
+  show?: (args: string[]) => Promise<string | undefined>;
+  pids?: number[];
+  container?: () => boolean;
+  /** The container's restart policy, as `containerRestartPolicy` says it. */
+  policy?: () => Promise<string | undefined>;
+}
+
+/**
+ * Whether the owner's Restart button can do what it says. Stricter than the update, which starts a copy of the portal
+ * itself where nothing else would: a portal started by hand in a terminal is not restarted from a page by a copy that
+ * takes the terminal's job over, unless `PORTAL_UPDATE_RESTART=self` says that is wanted.
+ *
+ * - `PORTAL_UPDATE_RESTART=self`: the portal starts its own copy.
+ * - a systemd service whose unit starts it again: it stops with `RESTART_EXIT`. A unit that does not is refused, also
+ *   when the portal is only in its control group (a wrapper script, `npm start` under dash): the copy it starts there is
+ *   ended with the group when the unit stops.
+ * - `PORTAL_UPDATE_RESTART=exit` (pm2, `while true`): it stops with `RESTART_EXIT`.
+ * - a container: it stops with `RESTART_EXIT`, and Docker's restart policy starts it. A policy that Docker says is
+ *   none is refused; where Docker cannot be asked, the compose files' `restart: unless-stopped` is taken as given.
+ * - otherwise nothing is known to start it again: refused.
+ */
+export async function restartSupport(deps: SupportDeps = {}): Promise<RestartSupport> {
+  const env = deps.env ?? process.env;
+  const cgroup = deps.cgroup ?? readCgroup() ?? "";
+  if (env.PORTAL_UPDATE_RESTART === "self") return { ok: true, mode: "self", by: "copy" };
+  const { mode, service, group } = await restartPlan(env, cgroup, deps.show, deps.pids);
+  const unit = service ?? group;
+  if (unit && unit.restart && !RESTARTS_ON_FAILURE.has(unit.restart)) {
+    return {
+      ok: false,
+      code: "policy",
+      message: service
+        ? `The portal runs as the systemd service ${unit.unit}, which is set to Restart=${unit.restart}, so it would not be started again. Set Restart=on-failure (or Restart=always) in the unit.`
+        : `The portal runs in the systemd service ${unit.unit} (started by a script or by npm, not as the unit's own process), which is set to Restart=${unit.restart}, so it would not be started again. Set Restart=on-failure (or Restart=always) in the unit. For a job of a daemon that is not stopped when the job ends (cron), PORTAL_UPDATE_RESTART=self lets the portal start its own copy.`,
+    };
+  }
+  if (mode === "exit") return { ok: true, mode, by: service ? "systemd" : "manager" };
+  // In a systemd service's control group without being its process: see restartPlan; the unit has to start it.
+  if (mode === "both") return { ok: true, mode, by: "systemd" };
+  if ((deps.container ?? inContainer)()) {
+    const policy = await (deps.policy ?? (() => containerRestartPolicy(env)))();
+    if (policy === "" || policy === "no") {
+      return { ok: false, code: "policy", message: "This container has no restart policy, so Docker would not start it again. Run it with restart: unless-stopped (as the compose files do), or restart it on the host." };
+    }
+    return { ok: true, mode: "exit", by: "container" };
+  }
+  return {
+    ok: false,
+    code: "unsupervised",
+    message: "Nothing would start this portal again here: it was not started by systemd or in a container. Start it again on the host, or run it under systemd (Restart=on-failure) or Docker. PORTAL_UPDATE_RESTART=self lets the portal start its own copy.",
+  };
 }

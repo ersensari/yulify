@@ -31,10 +31,10 @@ const script = path.join(home, "portal.mjs");
 writeFileSync(script, `
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const [marker, dist, how] = process.argv.slice(2);
-const { restartPlan, restartPortal, restartProblem, requestedExit } = await import(dist + "/restart.js");
+const { restartPlan, restartPortal, restartProblem, restartSupport, requestedExit } = await import(dist + "/restart.js");
 const lives = existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\\n").length : 0;
 const plan = await restartPlan();
-appendFileSync(marker, JSON.stringify({ life: lives + 1, mode: plan.mode, unit: plan.service?.unit ?? null, problem: await restartProblem() }) + "\\n");
+appendFileSync(marker, JSON.stringify({ life: lives + 1, mode: plan.mode, unit: plan.service?.unit ?? null, problem: await restartProblem(), support: await restartSupport() }) + "\\n");
 if (how === "plan" || lives > 0) setTimeout(() => process.exit(0), 100);
 else {
   process.on("SIGTERM", () => process.exit(requestedExit()));
@@ -85,6 +85,7 @@ test("under systemd with Restart=on-failure the portal is started again after th
   assert.equal(seen[0].mode, "exit", "told to be the service by its control group and its main process, with nothing set");
   assert.match(seen[0].unit, /^pithagoras-update-test-.*\.service$/);
   assert.equal(seen[0].problem, null, "a policy that restarts it is no problem");
+  assert.deepEqual(seen[0].support, { ok: true, mode: "exit", by: "systemd" }, "the Restart button may restart it");
 });
 
 test("under systemd with Restart=no the portal is not started again, and the check before the update says so", { skip: !manager && "no user manager of systemd" }, async () => {
@@ -97,6 +98,8 @@ test("under systemd with Restart=no the portal is not started again, and the che
   assert.equal(seen[0].mode, "exit");
   assert.match(seen[0].problem, /Restart=no/);
   assert.match(seen[0].problem, /Restart=on-failure \(or Restart=always\)/);
+  assert.equal(seen[0].support.ok, false, "and the Restart button refuses");
+  assert.equal(seen[0].support.code, "policy");
 });
 
 test("a portal that is the child of a service's main process, as under npm start, is taken for the service", { skip: !manager && "no user manager of systemd" }, async () => {
@@ -113,6 +116,7 @@ test("a portal under shells that do not exec, as npm start has under dash, start
   assert.equal(seen[0].mode, "both", "the main process is not the portal or its parent");
   assert.equal(seen[0].unit, null);
   assert.equal(seen[0].problem, null);
+  assert.deepEqual(seen[0].support, { ok: true, mode: "both", by: "systemd" }, "a unit that starts it again: the Restart button may restart it");
 });
 
 test("a portal that a service only runs a job for is not taken for the unit's own process: it starts a copy and stops with the status, and is not told to change the unit", { skip: !manager && "no user manager of systemd" }, async () => {
@@ -122,4 +126,9 @@ test("a portal that a service only runs a job for is not taken for the unit's ow
   assert.equal(seen[0].mode, "both");
   assert.equal(seen[0].unit, null);
   assert.equal(seen[0].problem, null);
+  // The Update goes ahead (it cannot tell the job from cron's), but the Restart button looks at the unit's policy, which
+  // is no: the copy it would start is ended with the unit's control group.
+  assert.equal(seen[0].support.ok, false);
+  assert.equal(seen[0].support.code, "policy");
+  assert.match(seen[0].support.message, /Restart=no/);
 });

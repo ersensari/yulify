@@ -9,7 +9,7 @@ German. Navigation runs down the left edge, in four groups:
 | **Models** | **Providers** — where models come from, see [Models and providers](/guide/models); **Defaults** — model, effort and context for new chats |
 | **Agent** | **Tools**, **Media**, **Skills**, **MCP**, **Extensions** |
 | **Reach** | **Channels**, **People** |
-| **Portal** | **This browser**, **Authentication**, **Add-ons**, **Shortcuts**, **Logs**, **About** (with **Update**), **Advanced** |
+| **Portal** | **This browser**, **Authentication**, **Add-ons**, **Shortcuts**, **Logs**, **About** (with **Update** and **Restart**), **Advanced** |
 
 Plus a page for every extension that exposes configuration.
 
@@ -435,6 +435,59 @@ on the host. The section is not there when the portal is not a git checkout.
 In a Docker container, which cannot rebuild itself, there is no button and no
 notice: the section says to update the image instead, see
 [Updating](/guide/deploying#updating).
+
+### Restart
+
+**Restart** in Settings → About, under Update, stops the portal and has whatever
+runs it start it again: for a new extension, or a setting that says it needs a
+fresh start, without a shell on the host. It works on any portal, a git checkout
+or a container, and asks first. The question says what happens: the portal is away
+for a few seconds to a minute, open chats reconnect on their own, and running
+chats and routines are stopped (their number is in the question; a chat carries on
+when you send it a message). After you confirm, the page waits, asks the portal
+whether it is back, and loads again when a new start of it answers. If it has not
+come back after three minutes, the page says so, and the log on the host says why.
+The page that loads after a restart says what it brought: the extensions the
+new start runs that the old one did not, and the ones it no longer runs. This is
+compared with what the portal had loaded when it started, not with what is
+installed, so an extension you installed just before pressing Restart is told as
+added.
+
+**While an update runs** the button is off, and a restart request is refused: the
+update has moved `node_modules` and the builds aside, and stopping the portal then
+would leave it without the files it starts from. An update is likewise refused for
+the moment a restart is on its way.
+
+**Logins.** The logins that were open end with a restart unless `PORTAL_SECRET`
+is set (see [Deploying](/guide/deploying#environment)). Without it, the question
+says so, and the login page is what you see when the portal is back; the note about
+what the restart brought is shown when you open About after signing in.
+
+The portal restarts only where something is there to start it again, and says so
+where there is not (the button is off, with the reason):
+
+- as a **systemd service** whose unit has `Restart=on-failure` or `Restart=always`;
+  a unit with `Restart=no` (systemd's default) is refused. This holds whether the
+  portal is the unit's own process or only runs inside it, from a wrapper script or
+  `npm start`: the copy such a portal starts is ended with the unit when it stops.
+  A job of a daemon that is not stopped when the job ends (cron) is told apart
+  from that by nothing but the daemon's own unit, so with `Restart=no` there it is
+  refused too; `PORTAL_UPDATE_RESTART=self` lets the portal start its own copy;
+- in a **Docker container** run with a restart policy (`unless-stopped`, `always`
+  or `on-failure`, as both Compose files have it); where Docker says the container
+  has none, it is refused;
+- under another manager (pm2, `while true`) when `PORTAL_UPDATE_RESTART=exit`
+  says so; with `PORTAL_UPDATE_RESTART=self` the portal starts a copy of itself.
+
+A portal started by hand in a terminal is none of these: nothing would start it
+again, so the button is off. Start it again on the host, or run it under systemd or
+in Docker. Unlike the Update, the Restart does not start a copy by itself without
+`PORTAL_UPDATE_RESTART=self`. How it ends, and what the supervisor sees, is in
+[Deploying](/guide/deploying#restarting).
+
+Anyone who can sign in can restart the portal, as they can already run commands
+on the host. Each restart is written to the [log](#logs) with the time and the
+address it came from.
 
 ## Shortcuts
 
