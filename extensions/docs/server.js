@@ -2,30 +2,45 @@
  * The Documents extension's server half: loaded once by the portal, for all chats.
  *
  * A document is a Markdown file in the `documents` folder of a folder chats
- * work in, where Files lists it and the agent can read it. This half finds
- * them for the page, which has no chat of its own to ask:
+ * work in, where Files lists it and the agent can read it. Each folder's
+ * documents have a store (store.js): their history in a git repository of its
+ * own, and a database for what is said about them, kept in the portal's data
+ * folder (place.js), where no agent can change it. This half serves them to
+ * the page, which has no chat of its own to ask:
  *
- *   GET /api/x/pithagoras-docs/folders                          every folder with documents, and its documents
- *   GET /api/x/pithagoras-docs/folders/:folder/documents/:name  one document's Markdown
+ *   GET  /api/x/pithagoras-docs/folders                                          every folder with documents, and its documents
+ *   POST /api/x/pithagoras-docs/folders/:folder/documents                        a new document { title, markdown?, scope?, chat? }
+ *   GET  /api/x/pithagoras-docs/folders/:folder/documents/:id                    one document's Markdown, and its revision
+ *   PUT  /api/x/pithagoras-docs/folders/:folder/documents/:id                    saves it { markdown, base }: 409 when base is not its revision
+ *   GET  /api/x/pithagoras-docs/folders/:folder/documents/:id/history            its revisions, newest first (?before=, ?limit=)
+ *   GET  /api/x/pithagoras-docs/folders/:folder/documents/:id/revisions/:revision  the text of one of them
+ *   POST /api/x/pithagoras-docs/folders/:folder/documents/:id/restore            { revision, base? }: that text as a new revision
  *
- * The page names a folder by an id made from its path, never by the path: a
- * folder is only one that a chat works in, as the portal lists them now.
+ * The page names a folder by an id made from its path, and a document by an
+ * id the store gave it, never by a path: a folder is only one that a chat
+ * works in, as the portal lists them now.
  */
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import path from "node:path";
 import { ensureDependencies } from "./deps.js";
+import { LEGACY_STORE, placeStore } from "./place.js";
+import { DocError, DOCUMENTS, isDocumentId, Store } from "./store.js";
 
-const DOCUMENTS = "documents";
-/** A document is read whole, so a file bigger than this is not one. */
-const MAX_BYTES = 1024 * 1024;
-/** The listing is bounded by work, not only by its answer: each document listed is a file opened. */
-const MAX_LISTED = 1000;
 /** Where a document's title is looked for: its first heading, near its top. */
 const HEAD_BYTES = 4096;
+/** A save's body: a document's Markdown (1 MB at most) written as JSON, which can take more room than the text. */
+const BODY_LIMIT = "8mb";
 
 const idOf = (folder) => createHash("sha256").update(folder).digest("hex").slice(0, 16);
-const isDocumentName = (name) => typeof name === "string" && name.toLowerCase().endsWith(".md") && !name.startsWith(".") && !/[/\\\0]/.test(name);
+
+/**
+ * Shapes that secrets have: a private key, and the tokens of the services most
+ * often pasted. A save that holds one is warned about; history keeps what is
+ * saved, so it is better not saved at all.
+ */
+const SECRET = /-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abpors]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/;
+const SECRET_WARNING = "This document looks like it holds a secret (a private key or a token). Its history keeps every revision: take it out, and see the guide on how to remove it from the history.";
 
 /**
  * How far a line, and a title, is looked at. A title is one line on the page.
@@ -290,10 +305,12 @@ function headingOf(text) {
 /** A document's title: its first heading near its top (the first HEAD_BYTES), or else its name. Listed and read alike. */
 const titleOf = (bytes, name) => headingOf(bytes.subarray(0, HEAD_BYTES).toString("utf8")) || name.replace(/\.md$/i, "");
 
-export default function (portal, { dependencies = ensureDependencies } = {}) {
+
+export default function (portal, { dependencies = ensureDependencies, faults, gitTimeoutMs } = {}) {
   // What it needs to run comes with the image. A folder without it (a checkout run as it is) has it installed now,
-  // in the background: the portal does not wait for an install to start the rest.
-  dependencies((line) => portal.log(line));
+  // in the background: the portal does not wait for an install to start the rest. The store waits for it.
+  const ready = dependencies((line) => portal.log(line));
+  let Database;
 
   /** The folders chats work in now, by id, with the chats that work in each. */
   function folders() {
@@ -316,110 +333,185 @@ export default function (portal, { dependencies = ensureDependencies } = {}) {
   /**
    * A folder's `documents` folder, or nothing when it has none. Only a folder
    * of that name itself: a link called `documents` leads to another folder of
-   * the project, which is not the documents' to be listed (or, later, written).
+   * the project, which is not the documents' to be listed or written.
    */
-  function documentsDir(folder) {
+  function documentsOf(folder) {
     try {
       const dir = portal.files.inside(folder, DOCUMENTS);
       // `inside` follows links: one that was followed comes back under another path.
-      if (dir !== path.join(folder, DOCUMENTS)) return null;
-      return lstatSync(dir).isDirectory() ? dir : null;
+      return dir === path.join(folder, DOCUMENTS) && lstatSync(dir).isDirectory() ? dir : null;
     } catch {
       return null;
     }
   }
 
-  /**
-   * A document's file, opened to be read: only a plain file directly in the
-   * documents folder, never a link (followed or swapped in), nor a second name
-   * of a file elsewhere (a hard link), nor one too big to be a document.
-   * Returns the open descriptor and its stat, or nothing.
-   */
-  function open(dir, name) {
-    if (!isDocumentName(name)) return null;
-    let file;
+  /** Where the stores are kept: a folder of the portal's own, made when first asked for. */
+  let dataFolder;
+  const data = () => (dataFolder ??= portal.dataDir());
+
+  /** Whether a folder has a store already, in the data folder or, as an earlier version kept it, in the folder itself (to be moved). */
+  function hasStore(id, folder) {
     try {
-      file = portal.files.inside(dir, name);
+      if (lstatSync(path.join(data(), id)).isDirectory()) return true;
     } catch {
-      return null;
+      // None there: the folder's own is the other place.
     }
-    // `inside` follows links: a link to another file in the folder comes back under that file's name.
-    if (path.dirname(file) !== dir || path.basename(file) !== name) return null;
-    let fd;
     try {
-      // Not waiting at the open: a pipe left under a document's name would hold the portal's only thread until
-      // something wrote to it. It is opened at once, and refused below for not being a file.
-      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      lstatSync(path.join(folder, LEGACY_STORE));
+      return true;
     } catch {
-      return null;
+      return false;
     }
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_BYTES) {
-      closeSync(fd);
-      return null;
-    }
-    return { fd, stat };
   }
 
-  function read(fd, bytes) {
-    const buffer = Buffer.alloc(bytes);
-    let at = 0;
-    while (at < bytes) {
-      const got = readSync(fd, buffer, at, bytes - at, at);
-      if (got === 0) break;
-      at += got;
-    }
-    return buffer.subarray(0, at);
-  }
-
-  /** The documents in a folder, by title. */
-  function documentsIn(folder) {
-    const dir = documentsDir(folder);
-    if (!dir) return [];
-    let names;
-    try {
-      names = readdirSync(dir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && isDocumentName(entry.name))
-        .map((entry) => entry.name)
-        .sort()
-        .slice(0, MAX_LISTED);
-    } catch {
-      return [];
-    }
-    const documents = [];
-    for (const name of names) {
-      const opened = open(dir, name);
-      if (!opened) continue;
-      try {
-        const title = titleOf(read(opened.fd, Math.min(HEAD_BYTES, opened.stat.size)), name);
-        documents.push({ name, title, size: opened.stat.size, modified: opened.stat.mtime.toISOString() });
-      } finally {
-        closeSync(opened.fd);
+  /** Each folder's store, opened once and kept while it is there: by the folder's path. */
+  const stores = new Map();
+  /** Where each store goes is settled one at a time: it looks at the others (a folder that was moved takes its store along). */
+  let placing = Promise.resolve();
+  const placed = (work) => (placing = placing.then(work, work));
+  /** `make`: a folder without a store yet gets one. Otherwise it has no documents to read: a request names none that is there. */
+  async function storeFor(folder, { make = false } = {}) {
+    for (;;) {
+      const known = stores.get(folder);
+      if (!known) break;
+      const store = await known.catch(() => null);
+      if (store?.stillThere()) return store;
+      // Deleted or replaced since, or it could not be opened: opened again.
+      if (stores.get(folder) === known) {
+        stores.delete(folder);
+        store?.close().catch(() => {});
       }
     }
-    return documents.sort((a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name));
+    const id = idOf(folder);
+    if (!make && !hasStore(id, folder)) throw new DocError(404, "There is no such document");
+    const opening = (async () => {
+      if (!Database) {
+        if (!(await ready)) throw new DocError(503, "The documents store's packages are not installed yet");
+        Database = (await import("better-sqlite3")).default;
+      }
+      const dir = await placed(() => placeStore({ data: data(), id, folder, documents: documentsOf(folder), inside: portal.files.inside, Database, sandbox: portal.sandbox.on(), faults, log: (line) => portal.log(line) }));
+      return Store.open(folder, { dir, inside: portal.files.inside, Database, faults, gitTimeoutMs });
+    })();
+    stores.set(folder, opening);
+    return opening;
   }
 
-  portal.router.get("/folders", (_req, res) => {
+  /** The folder a request names by its id, or a 404. */
+  function folderOf(req) {
+    const folder = folders().get(req.params.folder);
+    if (!folder) throw new DocError(404, "There is no such folder");
+    return folder;
+  }
+
+  /** The document a request names, or a 404 before anything is opened: an id is never a path. */
+  function documentOf(req) {
+    if (!isDocumentId(req.params.id)) throw new DocError(404, "There is no such document");
+    return req.params.id;
+  }
+
+  /** A revision named in a request: a whole number from 1 on, or a 400. */
+  function revisionOf(value, what) {
+    const n = typeof value === "string" && /^\d{1,9}$/.test(value) ? Number(value) : value;
+    if (!Number.isInteger(n) || n < 1) throw new DocError(400, `${what} must be a revision number`);
+    return n;
+  }
+
+  function markdownOf(body) {
+    if (typeof body?.markdown !== "string") throw new DocError(400, "markdown must be text");
+    return body.markdown;
+  }
+
+  const warn = (markdown) => (SECRET.test(markdown) ? { warning: SECRET_WARNING } : {});
+  const shown = ({ bytes, ...doc }) => ({ ...doc, title: titleOf(bytes, doc.name), markdown: bytes.toString("utf8") });
+
+  /** A route whose refusals are answered with their status, and whose failures are logged and answered with a 500. */
+  const route = (handler) => async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (e) {
+      if (e instanceof DocError) return res.status(e.status).json({ error: e.message, ...e.extra });
+      portal.log(`${req.method} ${req.path} failed: ${e?.stack ?? e}`);
+      res.status(500).json({ error: "The documents store could not do that" });
+    }
+  };
+  const json = portal.http.json({ limit: BODY_LIMIT });
+
+  portal.router.get("/folders", route(async (_req, res) => {
     const list = [];
     for (const folder of folders().values()) {
-      const documents = documentsIn(folder.path);
+      if (!documentsOf(folder.path)) continue;
+      let documents;
+      try {
+        const store = await storeFor(folder.path, { make: true });
+        documents = (await store.list(HEAD_BYTES)).map(({ head, ...doc }) => ({ ...doc, title: titleOf(head, doc.name) }));
+      } catch (e) {
+        // One folder's store that cannot be opened (a link in its place, git missing) leaves the others listed.
+        portal.log(`The documents in ${folder.path} could not be listed: ${e?.message ?? e}`);
+        continue;
+      }
+      documents.sort((a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name));
       if (documents.length) list.push({ ...folder, name: path.basename(folder.path) || folder.path, documents });
     }
     list.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
     res.json({ folders: list });
-  });
+  }));
 
-  portal.router.get("/folders/:folder/documents/:name", (req, res) => {
-    const folder = folders().get(req.params.folder);
-    const dir = folder && documentsDir(folder.path);
-    const opened = dir && open(dir, req.params.name);
-    if (!opened) return res.status(404).json({ error: "There is no such document" });
-    try {
-      const bytes = read(opened.fd, opened.stat.size);
-      res.json({ name: req.params.name, title: titleOf(bytes, req.params.name), markdown: bytes.toString("utf8"), modified: opened.stat.mtime.toISOString() });
-    } finally {
-      closeSync(opened.fd);
-    }
-  });
+  portal.router.post("/folders/:folder/documents", json, route(async (req, res) => {
+    const folder = folderOf(req);
+    const body = req.body ?? {};
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (!title || title.length > 200) throw new DocError(400, "A document needs a title of at most 200 characters");
+    const markdown = body.markdown === undefined || body.markdown === "" ? `# ${title}\n` : markdownOf(body);
+    const scope = body.scope ?? "project";
+    if (scope !== "project" && scope !== "chat") throw new DocError(400, "scope is project or chat");
+    // A chat's own document belongs to one of the chats that work in this folder.
+    if (scope === "chat" && !folder.chats.some((chat) => chat.id === body.chat)) throw new DocError(400, "A chat's document needs a chat that works in this folder");
+    const store = await storeFor(folder.path, { make: true });
+    const doc = await store.create({ title, markdown, scope, chat: scope === "chat" ? body.chat : null });
+    res.status(201).json({ ...doc, title: titleOf(Buffer.from(markdown, "utf8"), doc.name), ...warn(markdown) });
+  }));
+
+  portal.router.get("/folders/:folder/documents/:id", route(async (req, res) => {
+    const folder = folderOf(req);
+    const id = documentOf(req);
+    res.json(shown(await (await storeFor(folder.path)).read(id)));
+  }));
+
+  portal.router.put("/folders/:folder/documents/:id", json, route(async (req, res) => {
+    const folder = folderOf(req);
+    const id = documentOf(req);
+    const markdown = markdownOf(req.body);
+    const base = revisionOf(req.body.base, "base");
+    const doc = await (await storeFor(folder.path)).save(id, { markdown, base });
+    res.json({ ...doc, ...warn(markdown) });
+  }));
+
+  portal.router.get("/folders/:folder/documents/:id/history", route(async (req, res) => {
+    const folder = folderOf(req);
+    const id = documentOf(req);
+    const before = req.query.before === undefined ? undefined : revisionOf(req.query.before, "before");
+    const limit = req.query.limit === undefined ? undefined : Math.min(revisionOf(req.query.limit, "limit"), 500);
+    res.json(await (await storeFor(folder.path)).history(id, { before, limit }));
+  }));
+
+  portal.router.get("/folders/:folder/documents/:id/revisions/:revision", route(async (req, res) => {
+    const folder = folderOf(req);
+    const id = documentOf(req);
+    const { bytes, ...revision } = await (await storeFor(folder.path)).revision(id, revisionOf(req.params.revision, "revision"));
+    res.json({ ...revision, markdown: bytes.toString("utf8") });
+  }));
+
+  portal.router.post("/folders/:folder/documents/:id/restore", json, route(async (req, res) => {
+    const folder = folderOf(req);
+    const id = documentOf(req);
+    const revision = revisionOf(req.body?.revision, "revision");
+    const base = req.body?.base === undefined ? undefined : revisionOf(req.body.base, "base");
+    res.json(await (await storeFor(folder.path)).restore(id, { revision, base }));
+  }));
+
+  return async () => {
+    const open = [...stores.values()];
+    stores.clear();
+    for (const pending of open) await pending.then((store) => store.close(), () => {});
+  };
 }
