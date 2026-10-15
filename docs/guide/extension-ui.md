@@ -244,13 +244,14 @@ puts it before entries with a higher one, or none.
 
 | Slot | Where | Entry | The component is given |
 | --- | --- | --- | --- |
-| `chat.panel` | Beside the conversation, docked, floated and sized like Files and Git | `title`, `icon?`, `header?`, `actions?`, `useButton?` | `chat`, `channel`, `panels`, `close()`, `panel` |
+| `chat.panel` | Beside the conversation, docked, floated and sized like Files and Git | `title`, `icon?`, `header?`, `actions?`, `useButton?`, `name?` | `chat`, `channel`, `panels`, `close()`, `panel` |
 | `chat.header.action` | The chat's header, before the panels' buttons | | `chat`, `channel`, `panels` |
 | `chat.tool` | A call of one tool in the conversation, in place of the portal's card | `tool` (its name) | `chat`, `channel`, `panels`, `call`, `card` |
+| `chat.tool.action` | On the portal's card of a call, under what it returned, when the card is opened | `tool?` (a name or a pattern; every call without it) | `call`, `cut`, `panels` |
 | `chat.composer.above` | Above the message box | | `chat`, `channel`, `panels` |
 | `chat.overlay` | Over the chat, placed by you | | `chat`, `channel`, `panels` |
 | `chat.background` | Nowhere: there while the chat is on screen, drawing nothing | | `chat`, `channel`, `panels` |
-| `voice.window` | A window in voice mode, placed and sized like the portal's own | `title`, `icon?` | `chat`, `channel`, `panels`, `close()` |
+| `voice.window` | A window in voice mode, placed and sized like the portal's own | `title`, `icon?`, `place?`, `useAutoOpen?`, `opensFor?` | `chat`, `channel`, `panels`, `close()` |
 | `nav.page` | A page at `/x/<package>/<id>`, with an entry in the sidebar | `title`, `icon?` | |
 | `settings.page` | Your package's page in Settings, above the fields the portal found for it | | |
 
@@ -322,6 +323,55 @@ function NoteCall({ call, panels, card }) {
 was called with, what it has returned so far as text, and its result's
 `details`. `card` is the portal's own card for the call, to return as it is or
 to draw beside something of your own.
+
+### An action on a call's card
+
+Where the portal's own card is right for a call and you only have something to
+add to it ("Open in the terminal"), register an action for the tool. It is
+drawn on the card, under what the call returned, once the card is opened, in
+the conversation and wherever else the portal draws the card.
+
+```js
+portal.slots.register("chat.tool.action", {
+  id: "open",
+  tool: /^(bash|shell)$/,
+  component: ({ call, cut }) =>
+    call.callId ? h(portal.ui.ToolLink, { onClick: () => portal.panels.open("my-shell", { callId: call.callId }) }, cut ? "Show all of it" : "Open in My shell") : null,
+});
+```
+
+`cut` says whether the card shows only the end of the output. `ui.ToolLink`
+is the portal's own look for a link on a card. Draw nothing for a call you
+have nothing for. The `panels` the component is given are your own, by id;
+`portal.panels` reaches any panel by name, as `my-shell` above is reached by
+the `name` its `chat.panel` entry gave it.
+
+### A window in voice mode
+
+A `voice.window` has a button in voice mode's toolbar. Three more fields say
+how it behaves beside the portal's own windows:
+
+- `place`: `"side"` or `"middle"`, where it goes when it has the choice, as the
+  terminal always goes to the side and the browser to the middle. Without it,
+  it takes whichever place is left, as Files does.
+- `useAutoOpen(props)`: a hook, called while voice mode is on in a chat. It
+  returns a count, and the window opens each time the count grows: the number
+  of commands the agent ran, say, from `portal.chats.use`.
+- `opensFor(call)`: whether the card of a call in voice mode opens this window
+  when it is tapped. It is asked for the calls the portal's own windows are not
+  for: while the terminal, Files, the browser and the pictures are the
+  portal's own, a shell call's card opens the portal's terminal, and so on.
+
+```js
+portal.slots.register("voice.window", {
+  id: "shell",
+  title: "Terminal",
+  place: "side",
+  useAutoOpen: ({ chat }) => portal.chats.use(chat.id, (feed) => feed.events.filter((e) => e.type === "tool_execution_start" && e.payload.toolName === "deploy").length),
+  opensFor: (call) => call.name === "deploy",
+  component: Shell,
+});
+```
 
 ### A part that only listens
 
@@ -631,7 +681,11 @@ With the sandbox off both are the portal's own user, and `argv` is empty.
 
 `portal.panels` is the panels of the chat on screen, any of them, by name:
 `isOpen(name)`, `open(name, params?)`, `close(name)`. An extension's panel is
-`<package>/<id>`. The portal's own are:
+`<package>/<id>`, and also the `name` it gave itself, if any: that is how one
+extension's panel takes the place of another's that went by the name. The
+portal's own names are the portal's while those panels are its own. Of two
+extensions that name a panel alike, the one first in the slot's order has the
+name: a lower `order` first, then the one loaded first. The portal's own are:
 
 | Name | `open` takes |
 | --- | --- |
@@ -648,6 +702,43 @@ portal.commands.register("my-files.reveal", (path) => portal.panels.open("my-fil
 // Elsewhere, in another extension:
 if (portal.commands.has("my-files.reveal")) portal.commands.run("my-files.reveal", "src/index.ts");
 ```
+
+### What the portal asks of extensions
+
+Where the portal has a click that belongs to an app, it runs a command by a
+name any extension can register, and offers the click only while one does:
+
+| Command | Given | Asked when |
+| --- | --- | --- |
+| `jobs.show` | `{ chat, job }`: the chat's id and the job's key | A job in the running tray above the message box is clicked |
+
+Until an extension registers one, the portal does what it did before: a job
+opens in its own terminal.
+
+## Keyboard shortcuts
+
+A shortcut of your extension's is listed in Settings → Shortcuts with the
+portal's own, under your package's name, and changed or reset there the same
+way. Voice-mode shortcuts work while voice mode is on, except while someone is
+typing.
+
+```js
+portal.shortcuts.register({
+  id: "shell",
+  label: "Show or hide the terminal",
+  scope: "voice",
+  default: { code: "KeyT" },
+  run: ({ chat, windows }) => (windows.isOpen("shell") ? windows.close("shell") : windows.open("shell")),
+});
+```
+
+`default` is a physical key (`KeyboardEvent.code`) with `ctrl`, `alt`, `shift`
+or `meta`, or null for none. A key the portal or an extension loaded before
+yours has already is not taken from it: your shortcut has none until someone
+chooses one. `run` is given the chat on screen and your own voice windows by
+their ids. It returns false when it had nothing to do, and the key goes on to
+whatever else wants it. The label is translated as your other texts are
+([Other languages](#other-languages)).
 
 ## Other languages
 
@@ -807,7 +898,11 @@ extension:
 | A card of its own for its tool in the conversation | `chat.tool` |
 | A window over the chat; chips above the message box | `chat.overlay`, `chat.composer.above` |
 | Opening itself when the agent makes something | `chat.background` |
-| A window in voice mode | `voice.window` |
+| A window in voice mode, at the side, opening itself when the agent runs a command and when its card is tapped | `voice.window` with `place`, `useAutoOpen`, `opensFor` |
+| "Open in the agent terminal" on the card of a shell call | `chat.tool.action` |
+| A key in voice mode (T for the terminal) | `portal.shortcuts.register` |
+| Being opened by name from anywhere (`terminal`) | `name` on its `chat.panel` |
+| The running tray's jobs opening its Jobs tab | The `jobs.show` command |
 | A page in the sidebar; a page in Settings | `nav.page`, `settings.page` |
 | A slash command | `pi.registerCommand` in the pi extension, and the channel for what it does in the page |
 | The colours of everything | [A theme](#themes) |

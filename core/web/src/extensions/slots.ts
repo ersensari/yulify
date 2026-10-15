@@ -17,7 +17,7 @@ import { memo, useSyncExternalStore, type ComponentType } from "react";
 import type { Entry, SlotName } from "@pithagoras/extension-api";
 export type { Channel, Chat, ChatProps, Entry, PanelHandle, PanelProps, Panels, SlotMap, SlotName, ToolCallView } from "@pithagoras/extension-api";
 
-const SLOTS: readonly SlotName[] = ["chat.panel", "chat.header.action", "chat.background", "chat.overlay", "chat.composer.above", "chat.tool", "voice.window", "nav.page", "settings.page"];
+const SLOTS: readonly SlotName[] = ["chat.panel", "chat.header.action", "chat.background", "chat.overlay", "chat.composer.above", "chat.tool", "chat.tool.action", "voice.window", "nav.page", "settings.page"];
 
 /** An entry as the portal holds it. `key` is its name among all the slot's entries. */
 export type Registered<S extends SlotName> = Entry<S> & { extension: string; key: string };
@@ -49,6 +49,10 @@ const ordered = (entries: Registered<SlotName>[]) =>
 export function register<S extends SlotName>(extension: string, slot: S, entry: Entry<S>): () => void {
   if (!SLOTS.includes(slot)) throw new Error(`There is no slot called "${slot}". The slots are: ${SLOTS.join(", ")}`);
   if (typeof entry?.id !== "string" || !entry.id || !entry.component) throw new Error(`An entry in ${slot} needs an id and a component`);
+  const tool = (entry as { tool?: unknown }).tool;
+  if (slot === "chat.tool.action" && tool !== undefined && typeof tool !== "string" && !(tool instanceof RegExp)) {
+    throw new Error(`An entry in ${slot} names its tool by a name or a pattern, or leaves it out for every call`);
+  }
   const key = `${extension}/${entry.id}`;
   const before = held.get(slot) ?? NONE;
   if (before.some((e) => e.key === key)) throw new Error(`${extension} already has an entry called "${entry.id}" in ${slot}`);
