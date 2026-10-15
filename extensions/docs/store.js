@@ -46,9 +46,9 @@
  * is the last of its thread.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, chownSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, rmSync } from "node:fs";
+import { accessSync, closeSync, constants, fchmodSync, fchownSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
-import { DocError } from "./errors.js";
+import { DocError, explained } from "./errors.js";
 import { blobId, GitError, messageFor, parseTrailers, Repo } from "./git.js";
 import { Guard } from "./guard.js";
 import { bindingFor, readBinding, sameBinding, writeBinding } from "./place.js";
@@ -160,8 +160,11 @@ export class Store {
    * The store of `folder` (a chat's folder, as the portal names it), opened
    * in `dir` (place.js has seen to which one it is): made where it is not
    * there yet, then put right. `inside` is the portal's files helper.
-   * `faults` lets a test break a write after one of its steps:
-   * `faults.after(step)` is called after "write" and after "commit".
+   * `faults` lets a test break a write after one of its steps, or do
+   * what someone else could in between: `faults.after(step)` is called
+   * after "write" and after "commit", and while a missing `documents` folder
+   * is made, after it is made ("documents") and after it is opened
+   * ("documents-open").
    * `gitTimeoutMs` is how long one git run may take. `onRevision` is told of
    * every revision made from here on, as it is made (see `commit`), and
    * `onThreads` of every change to a document's comments.
@@ -178,7 +181,7 @@ export class Store {
         // Closed already, or never open.
       }
       store.guard?.close();
-      throw e;
+      throw explained(e, dir);
     }
     return store;
   }
@@ -218,7 +221,7 @@ export class Store {
       if (e.code !== "EEXIST") throw e;
     }
     const db = lstatSync(file);
-    if (!db.isFile() || (process.getuid && db.uid !== process.getuid())) throw new DocError(409, "The documents database is not the store's own");
+    if (!db.isFile() || (process.getuid && db.uid !== process.getuid())) throw Object.assign(new DocError(409, `The documents database is not the store's own (the store is ${this.storeDir})`), { operator: true });
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
@@ -259,7 +262,13 @@ export class Store {
 
   /** Runs `work` once everything before it in this folder is done: one write at a time, and no read in the middle of one. */
   locked(work) {
-    const next = this.queue.then(() => work());
+    const next = this.queue.then(async () => {
+      try {
+        return await work();
+      } catch (e) {
+        throw explained(e, this.storeDir);
+      }
+    });
     this.queue = next.catch(() => {});
     return next;
   }
@@ -288,19 +297,48 @@ export class Store {
     const found = this.documentsDir();
     if (found) return found;
     const dir = path.join(this.folder, DOCUMENTS);
-    if (this.inside(this.folder, DOCUMENTS) !== dir) throw new DocError(409, "documents in this folder is a link");
+    let followed;
+    try {
+      followed = this.inside(this.folder, DOCUMENTS);
+    } catch {
+      // A link that leads out of the folder is refused by `inside`: it is a link all the same.
+      throw new DocError(409, "documents in this folder is a link");
+    }
+    if (followed !== dir) throw new DocError(409, "documents in this folder is a link");
     const folder = lstatSync(this.folder);
     try {
       mkdirSync(dir, { mode: folder.mode & 0o7777 });
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
     }
-    if (!lstatSync(dir).isDirectory()) throw new DocError(409, "documents in this folder is not a folder");
-    chmodSync(dir, folder.mode & 0o7777);
+    this.fault("documents");
+    // Opened once, never through a link, and its mode and owner set through that descriptor: with the sandbox on the portal is root and
+    // the agent can write in the chat folder, so a link put where the folder was between a check and a `chmod` by path would have its
+    // target given the chat folder's mode and owner.
+    let fd;
     try {
-      chownSync(dir, folder.uid, folder.gid);
-    } catch {
-      // The portal is not root: the folder is its own already.
+      fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (e) {
+      if (e.code !== "ELOOP" && e.code !== "ENOTDIR") throw e;
+      // Which of the two it is only changes what is said: nothing was opened, or changed.
+      let link = e.code === "ELOOP";
+      try {
+        link ||= lstatSync(dir).isSymbolicLink();
+      } catch {
+        // Gone again: it is neither.
+      }
+      throw new DocError(409, link ? "documents in this folder is a link" : "documents in this folder is not a folder");
+    }
+    try {
+      this.fault("documents-open");
+      fchmodSync(fd, folder.mode & 0o7777);
+      try {
+        fchownSync(fd, folder.uid, folder.gid);
+      } catch {
+        // The portal is not root: the folder is its own already.
+      }
+    } finally {
+      closeSync(fd);
     }
     return dir;
   }
@@ -484,6 +522,8 @@ export class Store {
       await this.recover();
       const dir = this.documentsDir();
       if (!dir) return [];
+      const closed = this.closed(dir);
+      if (closed) throw closed;
       const out = [];
       const open = new Map(this.db.prepare("SELECT doc_id, COUNT(*) AS n FROM threads WHERE status = 'open' GROUP BY doc_id").all().map((r) => [r.doc_id, r.n]));
       const answered = new Map(this.db.prepare("SELECT doc_id, COUNT(*) AS n FROM threads WHERE answered = 1 GROUP BY doc_id").all().map((r) => [r.doc_id, r.n]));
@@ -523,14 +563,46 @@ export class Store {
       await this.recover();
       const row = this.existing(id);
       const file = this.fileOf(row);
-      if (!file) throw new DocError(404, "There is no such document");
+      if (!file) throw this.unreadable(row);
       return { ...this.describe(row, file), bytes: file.bytes };
+    });
+  }
+
+  /** Whose a document is (`scope`, and the chat for a chat's own): what asking the agent about it depends on, which needs no file. */
+  ownerOf(id) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      return { scope: row.scope, chat: row.chat_id };
     });
   }
 
   fileOf(row) {
     const dir = this.documentsDir();
     return dir ? readDocument(this.inside, dir, row.name) : null;
+  }
+
+  /** A refusal when the portal may not read the documents folder `dir`: an unreadable folder is not an empty one, nor are its files gone. */
+  closed(dir) {
+    try {
+      accessSync(dir, constants.R_OK | constants.X_OK);
+    } catch (e) {
+      if (e.code === "EACCES" || e.code === "EPERM") return new DocError(403, "The portal is not allowed to read this folder's documents folder (permission denied)");
+    }
+    return null;
+  }
+
+  /**
+   * Why a document's file cannot be read, as a refusal: the portal may not read the documents folder (403), it is gone (deleted,
+   * or renamed: 404, as for a document that is not there), or something is at its name that the portal does not read as a
+   * document (a file past 1 MB, or one it is not allowed to read: 409, which says so).
+   */
+  unreadable(row) {
+    const dir = this.documentsDir();
+    const closed = dir && this.closed(dir);
+    if (closed) return closed;
+    if (dir && isPlainFile(this.inside, dir, row.name)) return new DocError(409, "The document's file is bigger than 1 MB, or the portal is not allowed to read it");
+    return new DocError(404, "There is no such document");
   }
 
   /**
@@ -553,7 +625,9 @@ export class Store {
         const name = `${numbered(slug, n)}.md`;
         const taken = this.db.prepare("SELECT id FROM documents WHERE name = ?").get(name);
         if (taken) {
-          if (exclusive) throw new DocError(409, `A document called ${name} exists already`, { exists: taken.id });
+          // A document whose file is gone (deleted, or renamed) is not there to be told of: the number after it is used, not an error
+          // about a document that is neither listed nor readable.
+          if (exclusive && isPlainFile(this.inside, dir, name)) throw new DocError(409, `A document called ${name} exists already`, { exists: taken.id });
           continue;
         }
         let written;
@@ -598,7 +672,7 @@ export class Store {
       await this.recover();
       const row = this.existing(id);
       const file = this.fileOf(row);
-      if (!file) throw new DocError(404, "There is no such document");
+      if (!file) return this.#saveUnread(row, bytes, base, author);
       if (base !== row.revision) {
         const merged = merge ? await this.#merged(row, file, base, markdown, bytes, author) : null;
         if (merged) return merged;
@@ -607,6 +681,24 @@ export class Store {
       if (file.bytes.equals(bytes)) return { ...this.describe(row, file), changed: false };
       return this.#write(row, bytes, { author, subject: `Save ${row.name}` });
     });
+  }
+
+  /**
+   * A save for a document whose file cannot be read. Where the file is gone (deleted, or renamed) the person's text is the
+   * document: it is written as the document's file again, on the revision it started from, and the answer says so
+   * (`recreated`). One that has moved on since is the person's to choose about, as with a file that is there. A file that is there
+   * but is not read (past 1 MB, not readable) is an outside change nothing has taken in: it is not written over. Under the lock,
+   * after recovery.
+   */
+  async #saveUnread(row, bytes, base, author) {
+    const refusal = this.unreadable(row);
+    if (refusal.status !== 404) throw refusal;
+    if (base !== row.revision) {
+      const last = await this.textAt(row, row.revision);
+      if (last === null) throw refusal;
+      throw new DocError(409, `The document changed: it is at revision ${row.revision}, not ${base}`, { revision: row.revision, markdown: last });
+    }
+    return { ...(await this.#write(row, bytes, { author, subject: `Save ${row.name}, its file made again`, create: true })), recreated: true };
   }
 
   /**
@@ -647,7 +739,7 @@ export class Store {
     try {
       written = writeDocument(this.inside, dir, row.name, bytes, { create });
     } catch (e) {
-      if (e instanceof Refused) throw new DocError(409, e.message === "exists" ? "Another file took the document's name" : e.message);
+      if (e instanceof Refused) throw new DocError(409, e.taken ? "Another file took the document's name" : e.message);
       throw e;
     }
     this.fault("write");
@@ -846,8 +938,11 @@ export class Store {
       if (!Number.isInteger(base) || base < 1 || base > row.revision) throw new DocError(409, `The document is at revision ${row.revision}, not ${base}`, { code: "revision_mismatch", revision: row.revision });
       if (this.db.prepare("SELECT COUNT(*) AS n FROM threads WHERE doc_id = ?").get(row.id).n >= MAX_THREADS) throw new DocError(409, `A document can have at most ${MAX_THREADS} comment threads`, { code: "too_many" });
       const file = this.fileOf(row);
-      if (!file) throw new DocError(404, "There is no such document");
-      const current = this.text(file.bytes);
+      // A document whose file is gone (deleted, or renamed) is still open on a page that has its text: the passage is in the text the
+      // document last had, which is what the page shows until its next save makes the file again.
+      const refusal = file ? null : this.unreadable(row);
+      if (refusal && refusal.status !== 404) throw refusal;
+      const current = file ? this.text(file.bytes) : await this.textAt(row, row.revision);
       const there = base === row.revision ? current : await this.textAt(row, base);
       if (there === null || current === null) throw new DocError(409, "The document is not text that can be commented on");
       const found = locate(there, { quote, prefix, suffix, start });

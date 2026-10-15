@@ -1,6 +1,6 @@
 /**
  * Saving a document while it is edited: no React and no editor in it, so that
- * what it does can be tried alone (tests/docs-saver.test.mts).
+ * what it does can be tried alone (extensions/docs/test/saver.test.mts).
  *
  * It is told when the text changed and reads the text itself when it saves,
  * so what it sends is what the editor holds then, not what it held when the
@@ -69,7 +69,8 @@ export function createSaver({ read, send, onState, onMerged, delay = 1000, setTi
         baseline = text;
         if (answer.merged) merged = answer;
         if (!answer.warning) dismissed = false;
-        set({ base, warning: dismissed ? null : (answer.warning ?? null) });
+        // The server half names a warning by a code too, so that the page says it in the person's language; one without is said as it came.
+        set({ base, warning: dismissed ? null : (answer.warningCode ?? answer.warning ?? null) });
       } catch (e) {
         if (e?.status === 409 && Number.isInteger(e.body?.revision)) {
           const theirs = typeof e.body.markdown === "string" ? e.body.markdown : "";
