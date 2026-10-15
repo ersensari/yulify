@@ -36,6 +36,14 @@
  * (`follow`), from the old revision's text in the history, so that a revision
  * made any way at all (the page, the agent, a file written outside, a restore)
  * moves the passages and none has to say how.
+ *
+ * A comment that asks the agent (ping.js) is a row of `pings` as well, naming the
+ * chat asked and when the chat took it. The thread is `to_agent` from then until
+ * the agent comments in it, and `answered` from the agent's comment, or its
+ * resolving the thread, until the person reacts (a comment, resolving or opening
+ * it again, or saying they have seen it). The page saves the person's comment as it
+ * is typed: it is made, then changed, then taken away if it is typed away, while it
+ * is the last of its thread.
  */
 import { randomBytes } from "node:crypto";
 import { chmodSync, chownSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, rmSync } from "node:fs";
@@ -478,12 +486,14 @@ export class Store {
       if (!dir) return [];
       const out = [];
       const open = new Map(this.db.prepare("SELECT doc_id, COUNT(*) AS n FROM threads WHERE status = 'open' GROUP BY doc_id").all().map((r) => [r.doc_id, r.n]));
+      const answered = new Map(this.db.prepare("SELECT doc_id, COUNT(*) AS n FROM threads WHERE answered = 1 GROUP BY doc_id").all().map((r) => [r.doc_id, r.n]));
+      const asking = new Map(this.db.prepare("SELECT doc_id, COUNT(*) AS n FROM threads WHERE status = 'open' AND to_agent = 1 GROUP BY doc_id").all().map((r) => [r.doc_id, r.n]));
       for (const row of this.rows()) {
         if (row.revision === 0) continue;
         const opened = openDocument(this.inside, dir, row.name);
         if (!opened) continue;
         try {
-          out.push({ ...this.describe(row, opened), openThreads: open.get(row.id) ?? 0, head: readOpen(opened.fd, Math.min(headBytes, opened.size)) });
+          out.push({ ...this.describe(row, opened), openThreads: open.get(row.id) ?? 0, answeredThreads: answered.get(row.id) ?? 0, askingThreads: asking.get(row.id) ?? 0, head: readOpen(opened.fd, Math.min(headBytes, opened.size)) });
         } finally {
           closeSync(opened.fd);
         }
@@ -713,8 +723,13 @@ export class Store {
     }
   }
 
-  /** A comment thread as the page and the tools get it, with its comments in the order they were made. */
-  threadView(t, comments) {
+  /**
+   * A comment thread as the page and the tools get it, with its comments in the order they were made. `toAgent`: the person asked
+   * the agent in it (`@agent`) and it has not answered. `answered`: the agent answered in it and the person has not reacted
+   * since. `ping`: the last time the agent was asked: its number, the comment that asked, the chat it was for and whether the
+   * chat took it.
+   */
+  threadView(t, comments, ping) {
     return {
       id: t.id,
       status: t.status,
@@ -727,6 +742,9 @@ export class Store {
       revision: t.revision,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
+      toAgent: Boolean(t.to_agent),
+      answered: Boolean(t.answered),
+      ping: ping ? { id: ping.id, chat: ping.chat_id, comment: ping.comment_id, sent: ping.sent_at !== null } : null,
       comments: comments.map((c) => ({ id: c.id, author: c.author, body: c.body, at: c.created_at })),
     };
   }
@@ -736,7 +754,10 @@ export class Store {
     const threads = this.db.prepare("SELECT * FROM threads WHERE doc_id = ? ORDER BY rowid").all(row.id);
     const comments = new Map(threads.map((t) => [t.id, []]));
     for (const c of this.db.prepare("SELECT c.* FROM comments c JOIN threads t ON t.id = c.thread_id WHERE t.doc_id = ? ORDER BY c.rowid").all(row.id)) comments.get(c.thread_id).push(c);
-    return threads.map((t) => this.threadView(t, comments.get(t.id)));
+    // The last time each thread was asked about: the pings are in the order they were made.
+    const pings = new Map();
+    for (const p of this.db.prepare("SELECT p.* FROM pings p JOIN threads t ON t.id = p.thread_id WHERE t.doc_id = ? ORDER BY p.id").all(row.id)) pings.set(p.thread_id, p);
+    return threads.map((t) => this.threadView(t, comments.get(t.id), pings.get(t.id)));
   }
 
   /** A thread of the document, or a 404. */
@@ -801,7 +822,8 @@ export class Store {
       await this.recover();
       const row = this.existing(id);
       await this.follow(row);
-      return { revision: row.revision, threads: this.threadsOf(row) };
+      // Whose the document is tells which chats can answer a comment on it.
+      return { revision: row.revision, scope: row.scope, chat: row.chat_id, threads: this.threadsOf(row) };
     });
   }
 
@@ -881,14 +903,165 @@ export class Store {
     });
   }
 
-  /** The comment is added and the thread is last changed now. */
+  /**
+   * The comment is added and the thread is last changed now. The agent's comment is its answer to whoever asked it (the thread
+   * no longer waits for it) and is news to the person; the person's is a reaction to it.
+   */
   addComment(thread, text, author) {
     if (this.db.prepare("SELECT COUNT(*) AS n FROM comments WHERE thread_id = ?").get(thread.id).n >= MAX_COMMENTS) throw new DocError(409, `A thread can have at most ${MAX_COMMENTS} comments`, { code: "too_many" });
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.db.prepare("INSERT INTO comments (id, thread_id, author, body, created_at) VALUES (?, ?, ?, ?, ?)").run(randomBytes(8).toString("hex"), thread.id, author, text, now);
-      this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, thread.id);
+      this.db.prepare(`UPDATE threads SET updated_at = ?, ${author === "agent" ? "to_agent = 0, answered = 1" : "answered = 0"} WHERE id = ?`).run(now, thread.id);
     })();
+  }
+
+  /** A thread's last comment, or nothing. */
+  lastComment(thread) {
+    return this.db.prepare("SELECT * FROM comments WHERE thread_id = ? ORDER BY rowid DESC LIMIT 1").get(thread.id);
+  }
+
+  /**
+   * The flags a thread has when the comments it has are all there is: it waits for the agent if a ping asks in a comment later
+   * than the agent's last, and the agent has the last word if its comment is the last. For after a comment was taken away.
+   */
+  settleFlags(thread) {
+    const last = this.lastComment(thread);
+    const waiting = this.db
+      .prepare("SELECT 1 FROM pings p JOIN comments c ON c.id = p.comment_id WHERE p.thread_id = ? AND c.rowid > COALESCE((SELECT MAX(rowid) FROM comments WHERE thread_id = ? AND author = 'agent'), 0)")
+      .get(thread.id, thread.id);
+    this.db.prepare("UPDATE threads SET to_agent = ?, answered = ? WHERE id = ?").run(waiting ? 1 : 0, last?.author === "agent" ? 1 : 0, thread.id);
+  }
+
+  /**
+   * The person's last comment in an open thread asks the agent, to be answered by the agent of `chat` (nobody, when it is none:
+   * the ping is made all the same, and not delivered): the thread waits for the agent until the agent comments in it. A comment
+   * is asked in once: one that was taken by a chat is left as it is (`sent`), and one that was not is asked in again, of `chat`.
+   * `reached` says when a chat took it. Returns the ping's number, whether it was taken, and the thread.
+   */
+  ping(id, thread, { chat }) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      if (found.status !== "open") throw new DocError(409, "The thread is resolved: it is to be reopened to be asked in", { code: "thread_resolved" });
+      const last = this.lastComment(found);
+      if (last?.author !== "user") throw new DocError(409, "Only a comment of the person's asks the agent", { code: "comment_not_yours" });
+      const had = this.db.prepare("SELECT * FROM pings WHERE comment_id = ?").get(last.id);
+      let ping = had?.id;
+      this.db.transaction(() => {
+        if (!had) ping = Number(this.db.prepare("INSERT INTO pings (thread_id, comment_id, chat_id, kind, created_at) VALUES (?, ?, ?, 'mention', ?)").run(found.id, last.id, chat, new Date().toISOString()).lastInsertRowid);
+        else if (had.sent_at === null && had.chat_id !== chat) this.db.prepare("UPDATE pings SET chat_id = ? WHERE id = ?").run(chat, had.id);
+        this.db.prepare("UPDATE threads SET to_agent = 1 WHERE id = ?").run(found.id);
+      })();
+      this.toldThreads(row);
+      return { ping, sent: had ? had.sent_at !== null : false, thread: this.threadsOf(row).find((t) => t.id === found.id) };
+    });
+  }
+
+  /**
+   * The person's last comment of the thread no longer asks the agent (it was edited): a ping that no chat took is taken back.
+   * Returns the number of the ping that was, or nothing, the comment it was for, and the thread.
+   */
+  unping(id, thread) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      const last = this.lastComment(found);
+      const had = last ? this.db.prepare("SELECT * FROM pings WHERE comment_id = ? AND sent_at IS NULL").get(last.id) : undefined;
+      if (had) {
+        this.db.transaction(() => {
+          this.db.prepare("DELETE FROM pings WHERE id = ?").run(had.id);
+          this.settleFlags(found);
+        })();
+        this.toldThreads(row);
+      }
+      return { ping: had?.id, comment: had ? last.id : undefined, thread: this.threadsOf(row).find((t) => t.id === found.id) };
+    });
+  }
+
+  /**
+   * The chat took the ping `ping` of a thread, which was made for the comment `comment`. A ping number is given again once the ping
+   * that had it is gone (its comment typed away), so the ping that is marked is the one of that comment and no other. Returns the thread.
+   */
+  reached(id, thread, ping, comment) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      this.db.prepare("UPDATE pings SET sent_at = ? WHERE id = ? AND thread_id = ? AND comment_id = ?").run(new Date().toISOString(), ping, found.id, comment);
+      this.toldThreads(row);
+      return this.threadsOf(row).find((t) => t.id === found.id);
+    });
+  }
+
+  /** The person has read what the agent said in a thread: it is no longer news. */
+  seen(id, thread) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      if (found.answered) {
+        this.db.prepare("UPDATE threads SET answered = 0 WHERE id = ?").run(found.id);
+        this.toldThreads(row);
+      }
+      return this.threadsOf(row).find((t) => t.id === found.id);
+    });
+  }
+
+  /**
+   * The comment `comment` of an open thread, which is its last and written by `author`: it is the only one that can be changed
+   * or taken away, while the page saves it as it is typed. A refusal says which of these it is not.
+   */
+  editable(found, comment, author) {
+    if (found.status !== "open") throw new DocError(409, "The thread is resolved: it is to be reopened to be changed", { code: "thread_resolved" });
+    const last = this.lastComment(found);
+    const mine = typeof comment === "string" ? this.db.prepare("SELECT * FROM comments WHERE id = ? AND thread_id = ?").get(comment, found.id) : undefined;
+    if (!mine) throw new DocError(404, "There is no such comment", { code: "comment_not_found" });
+    if (mine.author !== author) throw new DocError(409, "That comment is not yours to change", { code: "comment_not_yours" });
+    if (last.id !== mine.id) throw new DocError(409, "Something was said in the thread after that comment: it is not changed any more", { code: "comment_not_last" });
+    return mine;
+  }
+
+  /** Changes the text of a comment, which is the last of its open thread and written by `author`. Returns the thread. */
+  edit(id, thread, comment, { body, author }) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      const mine = this.editable(found, comment, author);
+      const text = this.bodyOf(body);
+      this.db.transaction(() => {
+        this.db.prepare("UPDATE comments SET body = ? WHERE id = ?").run(text, mine.id);
+        this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), found.id);
+      })();
+      this.toldThreads(row);
+      return this.threadsOf(row).find((t) => t.id === found.id);
+    });
+  }
+
+  /**
+   * Takes away a comment, which is the last of its open thread and written by `author`: the page does it when what it saved
+   * was typed away. The thread goes with its only comment. Returns what was taken away (`thread` or `comment`), and the thread if
+   * it is still there. Its pings go with it.
+   */
+  remove(id, thread, comment, { author }) {
+    return this.locked(async () => {
+      await this.recover();
+      const row = this.existing(id);
+      const found = this.thread(row, thread);
+      const mine = this.editable(found, comment, author);
+      const only = this.db.prepare("SELECT COUNT(*) AS n FROM comments WHERE thread_id = ?").get(found.id).n === 1;
+      this.db.transaction(() => {
+        if (only) return this.db.prepare("DELETE FROM threads WHERE id = ?").run(found.id);
+        this.db.prepare("DELETE FROM comments WHERE id = ?").run(mine.id);
+        this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), found.id);
+        this.settleFlags(found);
+      })();
+      this.toldThreads(row);
+      return { removed: only ? "thread" : "comment", thread: only ? null : this.threadsOf(row).find((t) => t.id === found.id) };
+    });
   }
 
   /**
@@ -906,7 +1079,9 @@ export class Store {
         // The comment and the new state are made together or not at all.
         this.db.transaction(() => {
           if (text !== null && status === "resolved") this.addComment(found, text, author);
-          this.db.prepare("UPDATE threads SET status = ?, updated_at = ? WHERE id = ?").run(status, new Date().toISOString(), found.id);
+          // A closed thread waits for nobody. The agent's resolving it is an answer, news to the person; the person's is a
+          // reaction to what it said, like opening it again.
+          this.db.prepare(`UPDATE threads SET status = ?, updated_at = ?, answered = ${status === "resolved" && author === "agent" ? 1 : 0}${status === "resolved" ? ", to_agent = 0" : ""} WHERE id = ?`).run(status, new Date().toISOString(), found.id);
           if (text !== null && status === "open") this.addComment(found, text, author);
         })();
         this.toldThreads(row);

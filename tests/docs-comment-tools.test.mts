@@ -50,7 +50,7 @@ async function portal(chats: Record<string, string>, faults?: { after(step: stri
   };
   const agent = (chat: string) => {
     const tools = new Map<string, any>();
-    for (const factory of factories) factory({ registerTool: (tool: any) => tools.set(tool.name, tool) }, { id: chat, title: `Chat ${chat}`, workspace: chats[chat], status: 'idle' });
+    for (const factory of factories) factory({ registerTool: (tool: any) => tools.set(tool.name, tool), events: { on: () => () => {} }, on: () => {} }, { id: chat, title: `Chat ${chat}`, workspace: chats[chat], status: 'idle' });
     return async (name: string, params: unknown): Promise<Result> => {
       try {
         const result = await tools.get(name).execute('call-1', params, undefined, undefined, {});
@@ -62,7 +62,7 @@ async function portal(chats: Record<string, string>, faults?: { after(step: stri
   };
   const tools = (chat: string) => {
     const found = new Map<string, any>();
-    for (const factory of factories) factory({ registerTool: (tool: any) => found.set(tool.name, tool) }, { id: chat, title: `Chat ${chat}`, workspace: chats[chat], status: 'idle' });
+    for (const factory of factories) factory({ registerTool: (tool: any) => found.set(tool.name, tool), events: { on: () => () => {} }, on: () => {} }, { id: chat, title: `Chat ${chat}`, workspace: chats[chat], status: 'idle' });
     return found;
   };
   return { call, agent, tools, logged, close: async () => { await stop(); server.close(); } };
@@ -484,6 +484,24 @@ test('the tools say what they are for, and the rule for answering a comment is i
     assert.ok(tools.get('doc_reply').promptGuidelines.some((g: string) => /what was done/.test(g)));
     assert.ok(tools.get('doc_edit').parameters.properties.thread && tools.get('doc_edit').parameters.properties.reply);
     assert.deepEqual(tools.get('doc_edit').parameters.required, ['id', 'expected_revision', 'edits']);
+  } finally {
+    await docs.close();
+  }
+});
+
+test('the agent\'s comments are not the person\'s to change or take away: the page can only change its own', async () => {
+  const { docs, agent, person, url, threads } = await withDocument('docs-ct-yours-');
+  try {
+    const mine = await person('Ship it on Friday.', 'Why?');
+    await agent('doc_reply', { id: (await docs.call('GET', '/folders')).body.folders[0].documents[0].id, thread: mine.id, comment: 'Because.' });
+    const [thread] = await threads();
+    const theirs = thread.comments[1].id;
+    for (const [method, body] of [['PUT', { body: 'Changed' }], ['DELETE', undefined]] as const) {
+      const refused = await docs.call(method, `${url}/threads/${mine.id}/comments/${theirs}`, body);
+      assert.equal(refused.status, 409, method);
+      assert.equal(refused.body.code, 'comment_not_yours', method);
+    }
+    assert.deepEqual((await threads())[0].comments.map((c: any) => c.body), ['Why?', 'Because.']);
   } finally {
     await docs.close();
   }
