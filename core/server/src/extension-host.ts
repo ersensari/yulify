@@ -29,8 +29,8 @@ import type { Chat, ChatLife as Life, Ran, ServerPortal, Upgrade } from "@pithag
  * chat it keeps where the chat's pi works, in the chat's folder; what the
  * portal itself must run on, and no agent may change, it keeps in a folder of
  * the portal's data folder (`dataDir`).
- * It is what the portal's own Files, Terminal and Canvases have, each written
- * into the server; a package gets it by naming a module:
+ * It is what the portal's own Files has, written into the server, and what the
+ * Terminal, Git and Canvases extensions use; a package gets it by naming a module:
  *
  *   "pithagoras": { "server": "./server.js" }
  *
@@ -115,8 +115,10 @@ function wire(name: string, data: unknown): string | undefined {
 
 /** How the host reaches what only the session manager can do, which it cannot import: the manager imports it. */
 let tellChat: (chatId: string, extension: string, data: unknown) => Promise<boolean> = async () => false;
-export function setChatBridge(bridge: { tell: typeof tellChat }): void {
+let toolOffered: (chatId: string, tool: string) => "direct" | "lazy" | undefined = () => undefined;
+export function setChatBridge(bridge: { tell: typeof tellChat; offers: typeof toolOffered }): void {
   tellChat = bridge.tell;
+  toolOffered = bridge.offers;
 }
 
 function whoOf(chatId: string) {
@@ -180,6 +182,7 @@ function portalFor(ext: Running): ServerPortal {
       on: (event, handler) => void ext.life.on(event, handler),
       onEvent: (handler) => void ext.events.push(handler),
       tell: (chatId, data) => tellChat(chatId, name, data),
+      offers: (chatId, tool) => toolOffered(chatId, tool),
       extend: (factory) => void ext.factories.push(factory),
       hold: (chatId) => {
         ext.holds.set(chatId, (ext.holds.get(chatId) ?? 0) + 1);
@@ -379,16 +382,21 @@ export function extensionHolds(chatId: string): boolean {
 }
 
 /**
- * The pi extension every chat's pi is given for the server halves: it
- * registers what each of them asked to add, as they are when pi loads its
- * extensions, so a reload has what was installed since.
+ * The pi extensions a chat's pi is given for the server halves, one for each
+ * that adds to it: what it asked to add, registered for this chat. Asked for at
+ * each load, so a reload has what was installed since.
  */
-export function hostExtension(chatId: string): (pi: any) => void {
-  return (pi) => {
-    const row = getSession(chatId);
-    if (!row) return;
-    for (const ext of running.values()) {
-      for (const factory of ext.factories) guarded(ext.half.name, "adding to a chat's pi", () => factory(pi, chatOf(row)));
-    }
-  };
+export function hostExtensions(chatId: string): { name: string; factory: (pi: any) => void }[] {
+  // One for each package, by its name: pi files what each registers under it, so its tools are a group of their own
+  // in the settings, as a package's pi extension's are, and not one heap of every server half's.
+  return [...running.values()]
+    .filter((ext) => ext.factories.length)
+    .map((ext) => ({
+      name: ext.half.name,
+      factory: (pi: any) => {
+        const row = getSession(chatId);
+        if (!row) return;
+        for (const factory of ext.factories) guarded(ext.half.name, "adding to a chat's pi", () => factory(pi, chatOf(row)));
+      },
+    }));
 }

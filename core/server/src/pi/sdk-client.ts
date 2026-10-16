@@ -1,4 +1,3 @@
-import { CanvasTools } from "./canvas-tools.js";
 import { showImageTool } from "./show-image-tool.js";
 import { GENERATE_IMAGE_VOICE_LINE, GenerateImageTool } from "./generate-image-tool.js";
 import { EDIT_IMAGE_VOICE_LINE, EditImageTool } from "./edit-image-tool.js";
@@ -39,7 +38,7 @@ import { ASK_QUESTION_SOURCE, askQuestionTool } from "./ask-question.js";
 import { proxyBaseUrl } from "../llama-progress.js";
 import { bridgeSubagents, SUBAGENT_INPUT, SUBAGENT_STOP, type Bridge } from "../subagent-protocol.js";
 import { bridgeExtensionUi, UI_RECEIVE } from "../extension-ui.js";
-import { hostExtension } from "../extension-host.js";
+import { hostExtensions } from "../extension-host.js";
 import { contextWindowFor, getSkipThinkingProviders, getVoiceInstructions, getVoiceModel, portalBrowserOn, questionWaitMs, voiceSpeaks } from "../db.js";
 import { configStamp, isLlamaProvider } from "../providers.js";
 import { rereadConfig } from "./model-runtime.js";
@@ -190,7 +189,7 @@ function framing(): string[] {
 }
 
 /** pi's resource loader with the rule for spoken replies: see portalLoader. */
-let PortalLoader: (new (options: unknown, rule: AudioRule, said?: () => string[]) => any) | undefined;
+let PortalLoader: (new (options: unknown, rule: AudioRule, said?: () => string[], more?: () => unknown[]) => any) | undefined;
 
 /**
  * pi's resource loader, adding the rule for spoken replies to what pi appends
@@ -200,18 +199,23 @@ let PortalLoader: (new (options: unknown, rule: AudioRule, said?: () => string[]
  * and stays through every rebuild. Made once, the first time pi is loaded:
  * pi is imported lazily, so the class cannot exist before.
  */
-function portalLoader(pi: any): new (options: unknown, rule: AudioRule, said?: () => string[]) => any {
+function portalLoader(pi: any): new (options: unknown, rule: AudioRule, said?: () => string[], more?: () => unknown[]) => any {
   return (PortalLoader ??= class extends pi.DefaultResourceLoader {
     private readonly rule: AudioRule;
     /** Lines that depend on how the portal is set up now, asked each time like the rule. */
     private readonly said: () => string[];
     /** The skill paths the portal gives, before a folder's own are added to them. */
     private readonly portalSkillPaths: string[];
-    constructor(options: unknown, rule: AudioRule, said: () => string[] = () => []) {
+    /** The portal's own extensions, as they were given; what the server halves add is asked for at each load (`more`). */
+    private readonly portalFactories: unknown[];
+    private readonly more: () => unknown[];
+    constructor(options: unknown, rule: AudioRule, said: () => string[] = () => [], more: () => unknown[] = () => []) {
       super(options);
       this.rule = rule;
       this.said = said;
       this.portalSkillPaths = [...((options as { additionalSkillPaths?: string[] }).additionalSkillPaths ?? [])];
+      this.portalFactories = [...this.extensionFactories];
+      this.more = more;
     }
     /**
      * While the sandbox is on, the chat's folder is the agent's to write, and
@@ -223,6 +227,8 @@ function portalLoader(pi: any): new (options: unknown, rule: AudioRule, said?: (
       const sandboxed = sandboxOn();
       this.settingsManager.setProjectTrusted(!sandboxed);
       this.additionalSkillPaths = [...this.portalSkillPaths, ...(sandboxed ? projectSkillPaths(this.cwd) : [])];
+      // The server halves as they are now: one installed since the chat's pi started is in it after a reload.
+      this.extensionFactories = [...this.portalFactories, ...this.more()];
       return super.reload(options);
     }
     getAppendSystemPrompt(): string[] {
@@ -273,7 +279,7 @@ function sourceLabel(info: any): string {
   const path = typeof info?.path === "string" ? info.path : "";
 
   // pi writes its own as builtin:read (<builtin:read> before pi 1.1) and the
-  // portal's inline ones as <inline:canvases>. The second is worth naming; the
+  // portal's inline ones as <inline:sandbox>. The second is worth naming; the
   // first is the agent.
   const marker = /^(?:<(builtin|inline):([^>]+)>|(builtin):.+)$/.exec(path);
   if (marker) return marker[1] === "inline" ? marker[2] : "built in";
@@ -329,7 +335,6 @@ function callable(obj: any, key: string): any {
 export class SdkPiClient extends EventEmitter implements PiClient {
   private disposed = false;
   private toldShutdown = false;
-  private canvases?: CanvasTools;
   private voiceFirst?: VoiceFirstTurn;
   private audioRule?: AudioRule;
   private loader?: { appendedByPi(): string };
@@ -468,15 +473,18 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const imageTool = opts.sessionId ? new GenerateImageTool(opts.cwd, () => resourceLoader?.getExtensions?.().extensions ?? [], opts.sessionId) : undefined;
     const editTool = opts.sessionId ? new EditImageTool(opts.cwd, () => resourceLoader?.getExtensions?.().extensions ?? [], opts.sessionId) : undefined;
     const videoTool = opts.sessionId ? new GenerateVideoTool(opts.cwd, () => resourceLoader?.getExtensions?.().extensions ?? [], opts.sessionId) : undefined;
+    // What the tools that are on ask to be told in a spoken turn, whoever registered them: `voiceGuidelines` on a
+    // tool, as pi's own promptGuidelines are for every turn. Asked once the session is there (below).
+    let toolVoiceLines: () => string[] = () => [];
     const audioRule = new AudioRule(getVoiceInstructions, () =>
       [
         imageTool?.registered() && !switchedOff().has(GENERATE_IMAGE_TOOL) ? GENERATE_IMAGE_VOICE_LINE : "",
         editTool?.registered() && !switchedOff().has(EDIT_IMAGE_TOOL) ? EDIT_IMAGE_VOICE_LINE : "",
         videoTool?.registered() && !switchedOff().has(GENERATE_VIDEO_TOOL) ? GENERATE_VIDEO_VOICE_LINE : "",
+        ...toolVoiceLines(),
       ].filter(Boolean).join(" "),
       voiceSpeaks,
     );
-    const canvases = opts.sessionId ? new CanvasTools(opts.sessionId) : undefined;
     // Code mode, active from the start and switched like any other tool: off by default (see codemode.ts).
     const codemode = codemodeExtension(pi);
     try {
@@ -507,8 +515,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       ];
       // While the sandbox is on, pi's own tools do what they do to the system as the sandbox user: see sandbox/.
       factories.push({ name: "sandbox", factory: await sandboxTools(pi, opts.cwd) });
-      if (canvases) factories.push({ name: "canvases", factory: canvases.extension });
-      // Beside the canvases: both are how the agent puts something on the screen.
+      // How the agent puts a picture on the screen.
       if (opts.sessionId) factories.push({ name: SHOW_IMAGE_SOURCE, factory: showImageTool(opts.cwd) });
       // Registers nothing while the add-on is off or has no address: see GenerateImageTool.
       if (imageTool) factories.push({ name: GENERATE_IMAGE_SOURCE, factory: imageTool.extension });
@@ -539,8 +546,6 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       if (opts.heartbeatAgent && opts.sessionId) {
         factories.push({ name: "heartbeat", factory: heartbeatTool(opts.heartbeatAgent, opts.sessionId) });
       }
-      // What the installed extensions' server halves add to a chat's pi: see extension-host.ts.
-      if (opts.sessionId) factories.push({ name: "extension-host", factory: hostExtension(opts.sessionId) });
       resourceLoader = new (portalLoader(pi))({
         cwd: opts.cwd,
         // One for the loader and the session, so the folder's trust the loader decides holds for both.
@@ -582,7 +587,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         // Where its own skills go: only for the person it works for; a look or a colleague does not write them.
         ...(skillsOf && (!opts.role || opts.role === "primary") && !opts.heartbeatAgent ? [skillsLine(skillsOf)] : []),
         ...((!opts.role || opts.role === "primary") && understoryAt(opts.cwd) ? [UNDERSTORY_RULE] : []),
-      ]);
+      ],
+      // What the installed extensions' server halves add to the chat's pi, each under its package's name, as they are
+      // at each load: see extension-host.ts.
+      () => (opts.sessionId ? hostExtensions(opts.sessionId) : []));
       await resourceLoader.reload();
     } catch (e) {
       console.error(`[portal] resource loader unavailable: ${(e as Error).message}`);
@@ -629,6 +637,14 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       ...(model ? { model } : {}),
       ...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
     });
+    toolVoiceLines = () => {
+      const lines = new Set<string>();
+      for (const name of session.getActiveToolNames()) {
+        const asked = (session.getToolDefinition(name) as { voiceGuidelines?: unknown } | undefined)?.voiceGuidelines;
+        if (Array.isArray(asked)) for (const line of asked) if (typeof line === "string") lines.add(line);
+      }
+      return [...lines];
+    };
 
     const client = new SdkPiClient(session, modelRuntime, () => {});
     switchedOff = () => client.switchedOff;
@@ -636,18 +652,6 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     client.portalSessionId = opts.sessionId;
     client.dialogs = opts.dialogs !== false;
     client.rememberChatModel = opts.rememberChatModel;
-    client.canvases = canvases;
-    if (canvases) {
-      canvases.viaGateway = () => client.reachableLazy().has("canvas_write");
-      // Offered by its own name, not lazy and not switched off: a call of it otherwise is answered "not found".
-      canvases.direct = () => {
-        try {
-          return session.getActiveToolNames().includes("canvas_write");
-        } catch {
-          return false;
-        }
-      };
-    }
     if (eventBus && resourceLoader) {
       client.bus = eventBus;
       client.unbridge = bridgeSubagents(
@@ -670,7 +674,6 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const lazyCalls = new Map<string, string>();
     const unsub = session.subscribe((event: any) => {
       client.noteRun(event);
-      canvases?.observe(event);
       // As pi emits it, not as forward() passes it on: a queue_update held
       // behind a settle would be too late for the prompt() that caused it.
       client.noteQueue(event);
@@ -1211,7 +1214,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     // agent run and leaves a summarisation going — the one case where Stop
     // looks like it did nothing at all.
     if (this.session.isCompacting) this.session.abortCompaction();
-    try { await this.session.abort(); } finally { this.canvases?.interrupt(); }
+    await this.session.abort();
   }
 
   /**
@@ -1254,7 +1257,6 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     this.unbridgeUi?.();
     if (this.disposed) return;
     this.disposed = true;
-    this.canvases?.interrupt();
     try {
       this.unsubscribe();
     } catch {
@@ -1352,6 +1354,16 @@ export class SdkPiClient extends EventEmitter implements PiClient {
 
   /** The `tools` tool of this session, which is told what the lazy tools are called. */
   gateway?: ToolsGateway;
+
+  /** How the model is offered a tool now: by its own name, through the `tools` tool, or not at all (lazy and out of reach, switched off, not registered). */
+  offers(tool: string): "direct" | "lazy" | undefined {
+    if (this.reachableLazy().has(tool)) return "lazy";
+    try {
+      return this.session.getActiveToolNames().includes(tool) ? "direct" : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   /**
    * The lazy tools the gateway reaches: those that are on, registered and that pi wants active. Not every
