@@ -297,7 +297,7 @@ puts it before entries with a higher one, or none.
 | `chat.composer.above` | Above the message box | | `chat`, `channel`, `panels` |
 | `chat.overlay` | Over the chat, placed by you | | `chat`, `channel`, `panels` |
 | `chat.background` | Nowhere: there while the chat is on screen, drawing nothing | | `chat`, `channel`, `panels` |
-| `voice.window` | A window in voice mode, placed and sized like the portal's own | `title`, `icon?`, `place?`, `maximizable?`, `keepLoaded?`, `useAutoOpen?`, `opensFor?`, `describe?` | `chat`, `channel`, `panels`, `close()`, `maximized`, `maximize()`, `restore()` |
+| `voice.window` | A window in voice mode, placed and sized like the portal's own | `title`, `icon?`, `place?`, `maximizable?`, `keepLoaded?`, `useAutoOpen?`, `opensFor?`, `describe?` | `chat`, `channel`, `panels`, `close()`, `opened`, `maximized`, `maximize()`, `restore()` |
 | `nav.page` | A page at `/x/<package>/<id>`, with an entry in the sidebar | `title`, `icon?`, `useShown?` | |
 | `settings.page` | Your package's page in Settings, above the fields the portal found for it | | |
 
@@ -406,12 +406,13 @@ behaves beside the portal's own windows:
 - `useAutoOpen(props)`: a hook, called while voice mode is on in a chat. It
   returns a count, and the window opens each time the count grows: the number
   of commands the agent ran, say, from `portal.chats.use`.
-- `opensFor(call)`: whether the card of a call in voice mode opens this window
-  when it is tapped. It is asked for the calls the portal's own windows are not
-  for: a file's card opens Files, a page's the browser, and a shell call's,
-  which has none of the portal's, the window that says it is for it (the
-  terminal's).
-- `describe(call)`: what the card of such a call says, `{ label, detail? }`,
+- `opensFor(call, chat)`: whether the card of a call in voice mode opens this
+  window when it is tapped. It is asked for the calls the portal's own windows
+  are not for: a page's card opens the browser, and a file's or a shell call's,
+  which have none of the portal's, the window that says it is for them (Files',
+  the terminal's). `chat.workspace` tells a path in the chat's folder from one
+  elsewhere.
+- `describe(call, chat)`: what the card of such a call says, `{ label, detail? }`,
   in place of the portal's words for a tool it does not know ("Using canvas
   write"): Canvases' cards say "Writing in a document" and its title.
 - `maximizable`: its head gets a Maximize button, as the browser's has. The
@@ -422,6 +423,14 @@ behaves beside the portal's own windows:
 - `keepLoaded`: once it has opened, it stays while it is minimized, hidden and
   out of reach, so a frame or a stream in it is not loaded again each time it
   opens. Without it, a minimized window is gone until it opens again.
+
+Your component is told `opened`: what it was opened for, the last time it was,
+a new object each time. `{ by: "person" }` with its button, `{ by: "work" }`
+for what `useAutoOpen` counted, `{ by: "call", call }` for the card of a call
+that was tapped, and `{ by: "open", params }` for your own
+`windows.open(id, params)` in a shortcut. Files' window shows the file of a
+tapped card this way, and the file the agent just changed when that is what
+brought it up.
 
 ```js
 portal.slots.register("voice.window", {
@@ -631,6 +640,7 @@ restart the portal.
 | `sandbox.run(chatId, argv, options?)`, `sandbox.spawnAs(chatId)`, `sandbox.on()` | [Running things as the chat's agent](#running-things-as-the-chat-s-agent) |
 | `sandbox.personEnv()` | The portal's environment for a process the person starts, such as a shell of their own: without the mark the agent's processes carry, so it is not listed as a job the agent left running |
 | `files.inside(base, rel)` | A path checked to be inside a folder |
+| `files.list`, `read`, `write`, `rename`, `unsaved`, `remove`, `makeFolder`, `folder`, `open` | [A chat's folder](#a-chat-s-folder), read and changed with the portal's own checks |
 | `git.at(folder)` | [git and gh in a folder](#git-in-a-chat-s-folder), run as the portal runs its own |
 | `dataDir()` | [A folder of the package's own in the portal's data folder](#where-it-keeps-things), closed to everyone but the portal |
 | `log(text)`, `extension`, `executor`, `version` | A line in the portal's log; the package's name; how pi is run here; `1` |
@@ -640,8 +650,7 @@ restart the portal.
 ```js
 portal.router.get("/chats/:id/files", (req, res) => {
   const folder = portal.chats.folder(req.params.id);
-  const dir = portal.files.inside(folder, String(req.query.path ?? "."));
-  res.json({ entries: readdirSync(dir) });
+  res.json(portal.files.list(folder, String(req.query.path ?? "")));
 });
 // A body is read only where a route asks for it.
 portal.router.post("/chats/:id/notes", portal.http.json(), (req, res) => { /* req.body */ });
@@ -666,8 +675,9 @@ ended when the portal's password changes, as the portal's own streams are.
 What a server half keeps for a chat it keeps where the chat's pi works: in the
 chat's folder, `portal.chats.folder(id)`. The agent can read what is there, it
 moves with the project, and it is gone when the folder is. Give it a folder or
-a name of your own, and check every path that came from outside with
-`portal.files.inside`.
+a name of your own, check every path that came from outside with
+`portal.files.inside`, and read and change what the agent may have written
+there with `portal.files` (see [A chat's folder](#a-chat-s-folder)).
 
 ```js
 const file = portal.files.inside(portal.chats.folder(chatId), `.my-extension/${chatId}.json`);
@@ -691,6 +701,64 @@ const store = path.join(portal.dataDir(), folderId);   // the portal's alone: no
 ```
 
 [Documents](/guide/documents#where-the-history-is-kept) keeps its history there.
+
+### A chat's folder
+
+Reading and changing what is in a chat's folder goes through `portal.files`,
+not through `fs`. These are the portal's own functions (`workspace-files.ts`),
+the ones it uses for uploads and pictures, and [Files](/guide/files) is built
+on them. They are given to every server half because doing this by hand is
+easy to get wrong in a way that is a hole, not a bug:
+
+- **The agent writes there, links included.** A path a page sends is checked as
+  text (no `..`, no way out by an absolute path) and again where every link
+  along it really leads. `fs.readFile(path.join(folder, rel))` follows a link
+  the agent left, `notes.md → /data/portal.db` say, to wherever it points.
+- **A server half has the portal's rights, which can be more than the agent's.**
+  With the [sandbox](/guide/sandbox) on, the portal runs as root and the agent
+  as a user of its own. A file the agent cannot read, the portal can, and so
+  can a server half that is led to it.
+- **A check and an open are two steps.** Between them the agent can put a link
+  where the file was. A file is opened without following a link in its last
+  place (`O_NOFOLLOW`), and what is sent is read from what was opened, never by
+  opening the path again. A pipe left there does not hold the server, and a
+  device is not read.
+- **A save is put in place whole.** It is written beside the file and renamed
+  over it, so a full disk leaves the file as it was, not empty. It keeps the
+  file's mode and its owner, so a file the portal saved as root is still the
+  agent's to change. With `expected`, the time the file was read at, a file
+  the agent changed since is refused (`conflict`) rather than written over. A
+  file with a second name (a hard link, which may be outside) is left alone.
+- **A delete or a rename changes the link, not what it leads to**, never the
+  folder itself, and a folder holding git work that exists nowhere else (changes
+  not committed, commits no remote has, stashes) is refused (`unsaved`, with
+  what it holds) unless `discard` says so. `unsaved(base, rel)` asks first, for
+  a question that names it.
+- **Limits:** a file over 1 MB is not read or saved as text, and a folder with
+  more than 2,000 entries is listed in part (`truncated`), cut before each is
+  looked at, so a huge folder does not hold the thread every chat is served on.
+
+`base` is a folder from `chats.folder`, `rel` the path the page sent. A refusal
+throws an error with a `code`: `invalid`, `missing`, `conflict`, `exists`,
+`too_large`, `failed` or `unsaved`. Answer it by that code rather than by its
+sentence:
+
+```js
+const STATUS = { invalid: 400, missing: 404, conflict: 409, exists: 409, too_large: 413, failed: 500, unsaved: 409 };
+portal.router.put("/chats/:id/file", portal.http.json(), (req, res) => {
+  try {
+    const folder = portal.chats.folder(req.params.id);
+    res.json(portal.files.write(folder, String(req.query.path), req.body.content, { expected: req.body.mtime }));
+  } catch (e) {
+    if (e.code in STATUS) res.status(STATUS[e.code]).json({ error: e.message, code: e.code });
+    else res.status(500).json({ error: "Could not save it" });
+  }
+});
+```
+
+What reads a whole folder, such as an archive, takes it from `files.folder`,
+checked; a download is sent from the descriptor `files.open` gives. Files'
+server half (`extensions/files/src/server.ts`) is a complete example.
 
 ### Telling the pages open on a chat
 
@@ -820,7 +888,12 @@ handle: make one for each request rather than keeping it.
 ## Panels and commands
 
 `portal.panels` is the panels of the chat on screen, any of them, by name:
-`isOpen(name)`, `open(name, params?)`, `close(name)`. An extension's panel is
+`isOpen(name)`, `open(name, params?)`, `close(name)`, which asks what the panel
+asks before it is closed by hand (`guardClose`). `has(name)` says whether
+there is a panel by that name at all, the portal's or an installed
+extension's, and `useHas(name)` is the same as a hook, drawn again when an
+extension comes or goes: Git offers "Open in Files" only where there is a
+Files, which may be switched off or replaced. An extension's panel is
 `<package>/<id>`, and also the `name` it gave itself, if any: that is how one
 extension's panel takes the place of another's that went by the name. The
 portal's own names are the portal's while those panels are its own. Of two
@@ -829,14 +902,18 @@ name: a lower `order` first, then the one loaded first. The portal's own are:
 
 | Name | `open` takes |
 | --- | --- |
-| `files` | `{ path }`: a file to show |
 | `agents` | `{ id }`: a subagent to show |
 | `browser` | |
 
-Extensions a fresh portal installs go by names too. The terminal is `terminal`
+Extensions a fresh portal installs go by names too. Files is `files` and takes
+`{ path }`, a file in the chat's folder to show. The terminal is `terminal`
 and takes `{ callId }`, a command of the agent's to bring into view, or
 `{ job }`, a background job to follow. Git is `git`, and Canvases `canvas`;
 neither takes anything.
+
+The `title` of a panel, a voice window or a page is drawn in the page's
+language as your own `t` would say it: give its German in `locale.add`, and
+mark it with a `msg()` of your own so that your texts' check finds it.
 
 A command is something an extension says it can be asked to do, for another
 extension or the portal to ask by name. Start the name with your package's.
@@ -1065,14 +1142,14 @@ portal can be removed without a spec of the portal's failing.
 
 ## What the portal's own apps use
 
-The terminal, Git and Canvases are extensions (`extensions/terminal`,
-`extensions/git`, `extensions/canvas`); the portal's Files is written into it
-today. This is what each of them takes from
-the portal, and what gives the same to an extension:
+The terminal, Git, Files and Canvases are extensions (`extensions/terminal`,
+`extensions/git`, `extensions/files`, `extensions/canvas`). This is what each
+of them takes from the portal, and what gives the same to an extension:
 
 | The portal's app uses | An extension has |
 | --- | --- |
-| Routes that work with no agent running: listing, saving, uploads, downloads | `portal.router`, `chats.folder`, `files.inside` |
+| Routes that work with no agent running: listing, saving, renaming, deleting, downloads | `portal.router`, `chats.folder`, and [`portal.files`](#a-chat-s-folder) for the folder itself |
+| Uploads and pictures | The portal's own routes for them (`/api/sessions/:id/upload`, `/picture`), which its message box and conversation use too |
 | A shell and its stream, ended with the login it was opened under; cleanup when a chat goes | The server half, `http.upgrade` or a stream route, `http.endWithLogin`, `sandbox.personEnv`, `chats.on("deleted")` |
 | What the agent read, wrote and ran, as it happens | `portal.chats.use(chat.id, pick)` |
 | Tools that write to what the pages show (canvases, pictures) | `chats.extend`, `chats.send`, `chats.onOpen`, `chats.onEvent` |
@@ -1080,6 +1157,9 @@ the portal, and what gives the same to an extension:
 | A button only when there is something to open, with a dot while it runs | `useButton` |
 | "Discard your changes?", and staying open when a third panel opens | `panel.guardClose`, `panel.keep` |
 | One panel asking another to show a file, and staying open beside it | `panel.open("files", { path })`, `portal.commands` |
+| "Open in Files" only where there is a Files | `portal.panels.useHas("files")` |
+| A window in voice mode that shows the file of the card that was tapped | `opened` given to its `voice.window`, `opensFor(call, chat)` |
+| Its name in the page's language | `title` with `msg()`, and `locale.add` |
 | git and gh in a chat's folder, safely, with a write at a time | `portal.git.at(folder)` |
 | What changed in the history it shows, counted and dated in the page's language | `portal.tp`, `portal.tc`, `portal.tx`, `portal.format` |
 | Its components styled with the portal's utilities | `buildExtension` with `tailwind: true` |

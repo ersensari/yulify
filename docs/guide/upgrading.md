@@ -98,6 +98,23 @@ folder, beside `backups/`; the log says where each one went. They are files
 now, to open in Files or ask the agent to read, not canvases. The database was
 backed up before, as for any upgrade.
 
+## Files is an extension
+
+Files is the `pithagoras-files` extension now, installed on the first start
+like the terminal and Git: the button in a chat's header, the panel, its
+window in voice mode and <kbd>F</kbd> there are the same. An edit that was not
+saved when the portal was upgraded comes back as it was. Where a panel's place
+or size was set by hand, Files starts at the place the panels have by default
+once, and keeps what it is given from then on; a key chosen for "Show or hide
+files" under Settings → Shortcuts is <kbd>F</kbd> again. Switched off or
+removed, a chat's folder is still the agent's.
+
+Its routes moved with it: what was `/api/sessions/:id/files`, `file`, `folder`,
+`unsaved` and `archive` is now `/api/x/pithagoras-files/chats/:id/…` (see
+[Files' routes](/guide/files#its-routes)), answered the same way. A script that
+used the old addresses needs the new ones. Uploads (`/upload`), pictures and
+clips stay where they were.
+
 ## Upgrading from the first release
 
 What the first start after an install of version 0.1.0, or of any build made before this one, shows and needs:
