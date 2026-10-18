@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
@@ -133,8 +133,8 @@ async function portal(folder: string | Record<string, string>, { pingMs, pollMs 
       ended = true;
     })();
     const told = () => frames.filter((f) => f.event === 'documents').map((f) => f.data.version as string);
-    const wait = async (done: () => boolean, what: string) => {
-      await until(() => done() || ended, what, () => `the list was told as ${JSON.stringify(told())}`);
+    const wait = async (done: () => boolean, what: string, ms?: number) => {
+      await until(() => done() || ended, what, () => `the list was told as ${JSON.stringify(told())}`, ms);
       if (!done()) throw new Error(`The stream ended before ${what}`);
     };
     return { ...stream, frames, told, ended: () => ended, until: wait, last: () => told().at(-1) };
@@ -574,6 +574,39 @@ test('a document that is deleted, renamed or made again outside the page is told
     put(path.join(folder, 'documents', 'ideas.md'), '# Ideas\n');
     await current(docs, stream);
     assert.deepEqual(namesOf(await listed(docs)), ['ideas.md', 'schedule.md']);
+  } finally {
+    await docs.close();
+  }
+});
+
+test('a Markdown file put into a documents folder (an upload in Files) is told at once, not at the next look of the folders', async () => {
+  // The folders are looked at once a minute here: what is told sooner is told by the watch on the documents folder.
+  const { folder, docs } = await withDocument('docs-list-watched-', { pollMs: 60_000 });
+  try {
+    const stream = await docs.follow('/folders/events');
+    await stream.until(() => stream.told().length === 1, 'the first message');
+    writeFileSync(path.join(folder, 'documents', 'uploaded.md'), '# Uploaded\n');
+    await stream.until(() => stream.told().length === 2, 'the file put there');
+    assert.deepEqual(namesOf(await listed(docs)), ['plan.md', 'uploaded.md']);
+  } finally {
+    await docs.close();
+  }
+});
+
+test('a documents folder that was removed and made again is watched again, not at the next look of the folders', async () => {
+  // The folders are looked at once a minute here: the watch on the folder is what tells, and the old one watched the folder that is gone.
+  // On ext4 the folder made again gets the inode number of the one removed, so the watch is told dead by what it reports, not by that number.
+  const { folder, docs } = await withDocument('docs-list-remade-', { pollMs: 60_000 });
+  try {
+    const stream = await docs.follow('/folders/events');
+    await stream.until(() => stream.told().length === 1, 'the first message');
+    rmSync(path.join(folder, 'documents'), { recursive: true });
+    mkdirSync(path.join(folder, 'documents'));
+    await stream.until(() => stream.told().length === 2, 'the document gone with its folder', 20_000);
+    assert.deepEqual(namesOf(await listed(docs)), []);
+    writeFileSync(path.join(folder, 'documents', 'again.md'), '# Again\n');
+    await stream.until(() => stream.told().length === 3, 'the file put into the folder that was made again', 20_000);
+    assert.deepEqual(namesOf(await listed(docs)), ['again.md']);
   } finally {
     await docs.close();
   }

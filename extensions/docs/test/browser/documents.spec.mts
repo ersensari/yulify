@@ -53,6 +53,8 @@ async function portal(page: Page, folders: unknown[] = FOLDERS, streams: 'idle' 
   /** The documents the page asked for, as their addresses; the documents it made, as it asked for them. */
   const asked: string[] = [];
   const made: unknown[] = [];
+  /** The files the page uploaded, as it sent them. */
+  const uploaded: { name: string; markdown: string }[] = [];
   await mockPortal(page, async ({ path: p, method, route, json }) => {
     if (p === '/api/extension-ui') return { extensions: [{ name: NAME, version: '0.1.0', entry: address('client.js') + '?v=1', style: address('client.css') + '?v=1', server: `/api/x/${NAME}` }] };
     // The folder the portal serves of the package: its modules, the editor among them, and its stylesheet.
@@ -67,6 +69,11 @@ async function portal(page: Page, folders: unknown[] = FOLDERS, streams: 'idle' 
     if (p === `/api/x/${NAME}/folders/0123456789abcdef/documents` && method === 'POST') {
       made.push(json());
       return reply(201, { id: '4444444444444444', name: 'ideas.md', title: 'Ideas', revision: 1, scope: 'project', chat: null });
+    }
+    if (p === `/api/x/${NAME}/folders/0123456789abcdef/documents/upload` && method === 'POST') {
+      const file = json() as { name: string; markdown: string };
+      uploaded.push(file);
+      return reply(201, { id: '4444444444444444', name: file.name, title: 'Ideas', revision: 1, scope: 'project', chat: null });
     }
     if (p === `/api/x/${NAME}/folders/0123456789abcdef/documents/4444444444444444`) return { id: '4444444444444444', name: 'ideas.md', title: 'Ideas', revision: 1, markdown: '# Ideas\n', modified: '2026-10-04T09:30:00.000Z' };
     if (p.startsWith(`/api/x/${NAME}/folders/`)) {
@@ -95,7 +102,7 @@ async function portal(page: Page, folders: unknown[] = FOLDERS, streams: 'idle' 
     await says('tool_execution_start', { toolCallId: callId, toolName, args });
     await says('tool_execution_end', { toolCallId: callId, toolName, isError, result: { content: [{ type: 'text', text }], ...(details ? { details } : {}) } });
   };
-  return { asked, made, says, caughtUp, calls };
+  return { asked, made, uploaded, says, caughtUp, calls };
 }
 
 const sidebar = (page: Page) => page.getByRole('navigation', { name: 'Destinations' });
@@ -227,10 +234,8 @@ test('a chat has a Documents panel beside it: its folder\'s documents, opened in
   await expect(panels.getByText('Setting up')).toHaveCount(0);
   await panels.getByRole('button', { name: /The plan/ }).click();
   await expect(panels.getByRole('heading', { name: 'The plan', level: 1 })).toBeVisible();
-  // At a panel's width the comments are under the text, not squeezed beside it.
-  const editor = await panels.locator('.pd-editor').boundingBox();
-  const comments = await panels.locator('.pd-threads').boundingBox();
-  expect(comments!.y).toBeGreaterThan(editor!.y + editor!.height - 1);
+  // The comments are not drawn until they are asked for: nothing under the text, no margin.
+  await expect(panels.locator('.pd-threads, .pd-thread-card')).toHaveCount(0);
   await panels.getByRole('button', { name: /All documents/ }).click();
   // A new one, by its title: made in the chat's folder, and open at once.
   const create = panels.getByRole('button', { name: 'New document' });
@@ -570,4 +575,166 @@ test('a list that could not be asked for the first time says why, and is asked f
   await listStream(page, 'v1');
   await expect(page.getByRole('region', { name: 'site' })).toBeVisible();
   await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('the panel beside a chat lists every document of its folder, another chat\'s own marked as that chat\'s', async ({ page }) => {
+  await page.setViewportSize({ width: 1300, height: 800 });
+  const documents = [
+    ...(FOLDERS[0].documents as object[]),
+    { id: '5555555555555555', name: 'scratch.md', title: 'Scratch pad', revision: 1, size: 10, modified: '2026-10-02T09:30:00.000Z', scope: 'chat', chat: 'b', otherChat: true, chatTitle: 'Second chat' },
+  ];
+  await portal(page, [{ ...FOLDERS[0], documents }, FOLDERS[1]]);
+  await page.goto('/s/a');
+  await page.locator('.panel-toggle[aria-label="Documents"]').click();
+  const panels = page.getByRole('complementary', { name: 'Panels' });
+  await expect(panels.getByRole('listitem')).toHaveCount(3);
+  await expect(panels.getByRole('button', { name: /Scratch pad/ })).toContainText('scratch.md · From the chat Second chat · Changed');
+});
+
+test('Markdown files are uploaded into the chat\'s folder from the panel, with the button or dropped on the list, and one that is not Markdown is said', async ({ page }) => {
+  await page.setViewportSize({ width: 1300, height: 800 });
+  const { uploaded } = await portal(page);
+  await page.goto('/s/a');
+  await page.locator('.panel-toggle[aria-label="Documents"]').click();
+  const panels = page.getByRole('complementary', { name: 'Panels' });
+  await expect(panels.getByRole('button', { name: 'Upload' })).toBeVisible();
+  const picker = panels.locator('input[type="file"]');
+  await expect(picker).toHaveAttribute('accept', '.md,.markdown,text/markdown');
+  // A picture is not sent; a Markdown file is, as it is, under its name.
+  await picker.setInputFiles([
+    { name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('not text') },
+    { name: 'notes.md', mimeType: 'text/markdown', buffer: Buffer.from('# Notes\n\nKept as it is.\n') },
+  ]);
+  await expect(panels.getByRole('alert')).toContainText('photo.png is not a Markdown file (.md).');
+  await expect.poll(() => uploaded).toEqual([{ name: 'notes.md', markdown: '# Notes\n\nKept as it is.\n' }]);
+
+  // Dropped on the list: it is marked while the files are over it, and both are sent.
+  const files = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File(['# One\n'], 'one.md', { type: 'text/markdown' }));
+    data.items.add(new File(['# Two\n'], 'two.markdown', { type: 'text/markdown' }));
+    return data;
+  });
+  const zone = panels.locator('.pd-dropzone');
+  await zone.dispatchEvent('dragenter', { dataTransfer: files });
+  await expect(panels.getByText('Drop Markdown files here to add them as documents')).toBeVisible();
+  await zone.dispatchEvent('drop', { dataTransfer: files });
+  await expect(panels.getByText('Drop Markdown files here to add them as documents')).toHaveCount(0);
+  await expect.poll(() => uploaded.map((f) => f.name)).toEqual(['notes.md', 'one.md', 'two.markdown']);
+  // One file on its own, and nothing refused: it is opened.
+  await picker.setInputFiles([{ name: 'ideas.md', mimeType: 'text/markdown', buffer: Buffer.from('# Ideas\n') }]);
+  await expect(panels.locator('.ProseMirror h1')).toHaveText('Ideas');
+});
+
+test('a file that is not UTF-8 is not uploaded and the list says so; a UTF-8 file is sent with its byte order mark kept', async ({ page }) => {
+  await page.setViewportSize({ width: 1300, height: 800 });
+  const { uploaded } = await portal(page);
+  await page.goto('/s/a');
+  await page.locator('.panel-toggle[aria-label="Documents"]').click();
+  const panels = page.getByRole('complementary', { name: 'Panels' });
+  const picker = panels.locator('input[type="file"]');
+  await picker.setInputFiles([
+    // Windows-1252: its "Ä" is the single byte C4, which is no UTF-8.
+    { name: 'old.md', mimeType: 'text/markdown', buffer: Buffer.from('# \xc4rger\n', 'latin1') },
+    { name: 'bom.md', mimeType: 'text/markdown', buffer: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# Ärger\n', 'utf8')]) },
+    { name: 'plain.md', mimeType: 'text/markdown', buffer: Buffer.from('# Ärger\n', 'utf8') },
+  ]);
+  await expect(panels.getByRole('alert')).toContainText('old.md is not UTF-8 text, so it is not sent. Save it as UTF-8 first.');
+  await expect.poll(() => uploaded).toEqual([
+    { name: 'bom.md', markdown: '\uFEFF# Ärger\n' },
+    { name: 'plain.md', markdown: '# Ärger\n' },
+  ]);
+});
+
+test('a document open in the panel opens on a page of its own, the whole of it, with Full page', async ({ page }) => {
+  await page.setViewportSize({ width: 1300, height: 800 });
+  await portal(page);
+  await page.goto('/s/a');
+  await page.locator('.panel-toggle[aria-label="Documents"]').click();
+  const panels = page.getByRole('complementary', { name: 'Panels' });
+  await panels.getByRole('button', { name: /The plan/ }).click();
+  await expect(panels.getByRole('toolbar', { name: 'Formatting' })).toBeVisible();
+  await panels.getByRole('button', { name: /Full page|Open on its own page/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/x/${NAME}/documents\\?folder=0123456789abcdef&doc=1111111111111111$`));
+  await expect(page.locator('.pd-full .ProseMirror h1')).toHaveText('The plan');
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toHaveCount(0);
+});
+
+test('a document open in the panel is a page that fills it to its bottom, with no frame, and its list opens from the right edge', async ({ page }) => {
+  // Taller than a short document, which is what shows a strip under it.
+  await page.setViewportSize({ width: 1300, height: 1300 });
+  await portal(page);
+  await page.goto('/s/a');
+  await page.locator('.panel-toggle[aria-label="Documents"]').click();
+  const panels = page.getByRole('complementary', { name: 'Panels' });
+  await panels.getByRole('button', { name: /The plan/ }).click();
+  await expect(panels.getByRole('heading', { name: 'The plan', level: 1 })).toBeVisible();
+  const at = () =>
+    page.evaluate(() => {
+      const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      const panel = document.querySelector('.pd-panel') as HTMLElement;
+      const sheet = getComputedStyle(document.querySelector('.pd-sheet')!);
+      return { panel: rect('.pd-panel').bottom, scroll: rect('.pd-scroll').bottom, sheet: rect('.pd-sheet').bottom, toolbar: rect('.pd-toolbar').bottom, top: rect('.pd-scroll').top, scrolls: panel.scrollHeight > panel.clientHeight + 1, frame: [sheet.borderTopWidth, sheet.boxShadow, sheet.backgroundColor] };
+    });
+  // The page goes down to the panel's end (it is the text's ground the whole way), and the panel has nothing to scroll for the room under it.
+  await expect.poll(async () => Math.round((await at()).panel - (await at()).scroll)).toBe(0);
+  const now = await at();
+  expect(Math.round(now.sheet)).toBe(Math.round(now.panel));
+  expect(Math.round(now.top)).toBe(Math.round(now.toolbar));
+  expect(now.scrolls).toBe(false);
+  expect(now.frame).toEqual(['0px', 'none', 'rgba(0, 0, 0, 0)']);
+  // Its list comes in from the right edge, over the page, the whole height of it (the panel is narrow).
+  await panels.getByRole('button', { name: /^Comments/ }).click();
+  const list = (await panels.getByRole('complementary', { name: 'Comments' }).boundingBox())!;
+  const desk = (await page.locator('.pd-desk').boundingBox())!;
+  expect(Math.round(list.x + list.width)).toBe(Math.round(desk.x + desk.width));
+  expect(Math.round(list.y)).toBe(Math.round(desk.y));
+  expect(Math.round(list.y + list.height)).toBe(Math.round(desk.y + desk.height));
+  expect(list.width).toBeLessThanOrEqual(320);
+  await panels.getByRole('complementary', { name: 'Comments' }).getByRole('button', { name: 'Close' }).click();
+  // In a shorter panel, where the text is longer than it: the page scrolls in itself, and the panel does not.
+  await page.setViewportSize({ width: 1300, height: 500 });
+  await expect.poll(() => page.evaluate(() => { const s = document.querySelector('.pd-scroll')!; return s.scrollHeight > s.clientHeight; })).toBe(true);
+  const short = await at();
+  expect(short.scrolls).toBe(false);
+  expect(Math.abs(Math.round(short.panel - short.scroll))).toBe(0);
+});
+
+test('the extension\'s module registers its page without the editor\'s half, which is loaded when a document is first opened', async ({ page }) => {
+  const modules: string[] = [];
+  page.on('request', (request) => {
+    const at = new URL(request.url()).pathname;
+    if (at.startsWith(address(''))) modules.push(at.slice(address('').length));
+  });
+  await portal(page);
+  await page.goto(`/x/${NAME}/documents`);
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  await expect(sidebar(page).getByRole('button', { name: 'Documents' })).toHaveAttribute('aria-current', 'page');
+  // The page is there, with its list, and nothing of the editor was asked for: not its half of the page, not the comments, not the editor.
+  expect(modules).toContain('client.js');
+  expect(modules.filter((name) => /document-editor|comments|saver|anchor|live|editor\.js/.test(name))).toEqual([]);
+  // A document opened loads it, behind the page's loading state.
+  await page.getByRole('region', { name: 'site' }).getByRole('button', { name: /The plan/ }).click();
+  await expect(page.locator('.pd-editor h1')).toHaveText('The plan');
+  expect(modules).toEqual(expect.arrayContaining(['document-editor.js', 'editor.js']));
+});
+
+test('a failed load of the editor offers a reload, not a retry that cannot work, and the page loads the editor after it', async ({ page }) => {
+  await portal(page);
+  let asked = 0;
+  await page.route('**/document-editor.js*', (route) => (asked++ === 0 ? route.abort() : route.fallback()));
+  await page.goto(`/x/${NAME}/documents`);
+  await page.getByRole('region', { name: 'site' }).getByRole('button', { name: /The plan/ }).click();
+  // Said once, in the words of the failure, with the one thing that helps.
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('The editor could not be loaded');
+  await expect(alert).not.toContainText('Could not load this');
+  await expect(alert.getByRole('button', { name: 'Reload the page' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+  // The browser keeps the failure: a second ask would not even go out.
+  expect(asked).toBe(1);
+  await alert.getByRole('button', { name: 'Reload the page' }).click();
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  await page.getByRole('region', { name: 'site' }).getByRole('button', { name: /The plan/ }).click();
+  await expect(page.locator('.pd-editor h1')).toHaveText('The plan');
 });

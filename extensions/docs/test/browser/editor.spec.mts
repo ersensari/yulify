@@ -227,13 +227,11 @@ test('a mark moves with the text as it is typed, a click on it is told with the 
   await editorPage(page);
   await page.evaluate(async (markdown) => {
     (window as any).clicked = [];
-    (window as any).selected = [];
     (window as any).placed = [];
     const ed = (window as any).ed = await (window as any).editor.createEditor({
       root: document.getElementById('root'), markdown,
       // The page makes a thread the one looked at when it is clicked, and does it at once.
       onThread: (id: string) => { (window as any).clicked.push(id); ed.activate(id); },
-      onSelect: (on: boolean) => (window as any).selected.push(on),
       onPlaced: (m: Map<string, string>) => (window as any).placed.push([...m]),
     });
     const text = ed.markdown();
@@ -253,6 +251,13 @@ test('a mark moves with the text as it is typed, a click on it is told with the 
   expect(await page.evaluate(() => (window as any).clicked)).toContain('green');
   expect((await caret())[0]).toBe('The build is green.');
   expect(await page.locator('#root').evaluate((root) => (root as HTMLElement).dataset.activeThread)).toBe('green');
+  // The caret in it is how the keyboard finds the thread; a click in no passage is told too, with no id (what is open is to be closed).
+  expect(await page.evaluate(() => (window as any).ed.threadAtCaret())).toBe('green');
+  await page.locator('#root p').first().click();
+  expect(await page.evaluate(() => (window as any).clicked.at(-1))).toBe(null);
+  expect(await page.evaluate(() => (window as any).ed.threadAtCaret())).toBe(null);
+  await mark('green').click({ position: { x: 20, y: 5 } });
+  expect(await page.evaluate(() => (window as any).clicked.at(-1))).toBe('green');
   // Typed at its start, it is not in it.
   await page.keyboard.press('Home');
   await page.keyboard.type('Now ');
@@ -278,11 +283,6 @@ test('a mark moves with the text as it is typed, a click on it is told with the 
   expect(await caret()).toEqual(before);
   await page.evaluate(() => (window as any).ed.activate(null));
   expect(await page.locator('#root').evaluate((root) => (root as HTMLElement).dataset.activeThread)).toBe('');
-  // Selected, and not.
-  await page.keyboard.press('Shift+Home');
-  await expect.poll(() => page.evaluate(() => (window as any).selected.at(-1))).toBe(true);
-  await page.keyboard.press('ArrowRight');
-  await expect.poll(() => page.evaluate(() => (window as any).selected.at(-1))).toBe(false);
 });
 
 test('the marks are where they were when the document is put in the editor again, by change or whole', async ({ page }) => {
