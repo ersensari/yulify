@@ -2617,10 +2617,17 @@ export interface KnownTool {
   scriptsOnly?: true;
   /** Said by the tool: off until somebody switches it on. Read the first time the tool is seen, and not kept. */
   offByDefault?: true;
+  /** The parameters that hold the files it is approved for, as its definition declares them: what an approval of it is written as, answered when no chat of it is running. */
+  approvalFiles?: string[];
+}
+
+/** The parameters that hold the files a tool is approved for, as it last declared them: see declaredFiles in guard.ts. */
+export function approvalFilesOf(toolName: string): string[] | undefined {
+  return knownTools().find((t) => t.name === toolName)?.approvalFiles;
 }
 
 /** A tool a session reported, as it is remembered. */
-export const remembered = (t: { name: string; source: string; description?: string; package?: string; inline?: true; scriptsOnly?: true; offByDefault?: true }): KnownTool => ({
+export const remembered = (t: { name: string; source: string; description?: string; package?: string; inline?: true; scriptsOnly?: true; offByDefault?: true; approvalFiles?: string[] }): KnownTool => ({
   name: t.name,
   source: t.source,
   description: t.description,
@@ -2628,6 +2635,7 @@ export const remembered = (t: { name: string; source: string; description?: stri
   inline: t.inline === true,
   ...(t.scriptsOnly ? { scriptsOnly: true } : {}),
   ...(t.offByDefault ? { offByDefault: true } : {}),
+  ...(t.approvalFiles?.length ? { approvalFiles: t.approvalFiles } : {}),
 });
 
 /**
@@ -2684,6 +2692,7 @@ export function knownTools(): KnownTool[] {
         ...(typeof t.package === "string" && t.package ? { package: t.package } : t.package === null ? { package: null } : {}),
         ...(typeof t.inline === "boolean" ? { inline: t.inline } : {}),
         ...(t.scriptsOnly === true ? { scriptsOnly: true } : {}),
+        ...(Array.isArray(t.approvalFiles) && t.approvalFiles.length && t.approvalFiles.every((n: unknown) => typeof n === "string") ? { approvalFiles: t.approvalFiles as string[] } : {}),
       }));
   } catch {
     return [];
@@ -2698,6 +2707,15 @@ export function knownTools(): KnownTool[] {
  * For a chat, `folder` is where it runs, whose project may bring packages of
  * its own.
  */
+/**
+ * What each running server half that follows its settings offers now, by its name (`portal.tools.offer`): set by the
+ * extension host, which this module cannot import.
+ */
+let serverHalfOffers: () => Map<string, { name: string; description?: string }[]> = () => new Map();
+export function setServerHalfOffers(read: typeof serverHalfOffers): void {
+  serverHalfOffers = read;
+}
+
 export function shownTools(folder?: string, view: McpView = mcpView()): (Omit<KnownTool, "package" | "inline"> & { inline?: true; cached?: true })[] {
   const user = readPiSettings().packages;
   const project = folder ? readProjectPiSettings(folder).packages : undefined;
@@ -2719,11 +2737,22 @@ export function shownTools(folder?: string, view: McpView = mcpView()): (Omit<Kn
   // Every MCP server's tools, from the adapter's cache, whether a chat has had them one by one or not: a server is a
   // group like any other, whole or tool by tool. A tool a chat reported is listed as it reported it.
   const seen = new Set(known.map((t) => t.name));
-  const available = [...known, ...catalogue.filter((t) => !seen.has(t.name))].filter(toolAvailability(user, project));
+  // A server half that says what its pi extension registers now (portal.tools.offer): of its tools that are remembered,
+  // only those are listed, and those are listed before a chat has reported them. Its tools are known by its name, which
+  // the portal files them under as an inline extension's.
+  const halves = serverHalfOffers();
+  const offered = (tool: KnownTool) => !(tool.inline === true && halves.has(tool.source)) || halves.get(tool.source)!.some((t) => t.name === tool.name);
+  const remembered = [...known, ...catalogue.filter((t) => !seen.has(t.name))].filter(toolAvailability(user, project)).filter(offered);
+  const listed = new Set(remembered.map((t) => t.name));
+  const fromHalves: KnownTool[] = [...halves].flatMap(([source, tools]) =>
+    tools.filter((t) => !listed.has(t.name)).map((t) => ({ name: t.name, source, package: null, inline: true, ...(t.description ? { description: t.description } : {}) })),
+  );
+  const available = [...remembered, ...fromHalves];
   return [...available, ...notYetSeen(available, images, editing, videos)]
-    .filter((tool) => images || !(tool.name === GENERATE_IMAGE_TOOL && tool.inline))
-    .filter((tool) => editing || !(tool.name === EDIT_IMAGE_TOOL && tool.inline))
-    .filter((tool) => videos || !((tool.name === GENERATE_VIDEO_TOOL || tool.name === SHOW_VIDEO_TOOL) && tool.inline))
+    // The portal's own by its label as well: a server half's tool of one of these names is inline too, and is its own.
+    .filter((tool) => images || !(tool.name === GENERATE_IMAGE_TOOL && tool.inline && pictureSource(tool.name) === tool.source))
+    .filter((tool) => editing || !(tool.name === EDIT_IMAGE_TOOL && tool.inline && pictureSource(tool.name) === tool.source))
+    .filter((tool) => videos || !((tool.name === GENERATE_VIDEO_TOOL || tool.name === SHOW_VIDEO_TOOL) && tool.inline && pictureSource(tool.name) === tool.source))
     .flatMap((known) => {
       const offer = offers(known);
       if (unlisted(offer)) return [];
@@ -3092,6 +3121,8 @@ export function rememberTools(reported: KnownTool[]): string[] {
       ...(pkg !== undefined ? { package: pkg } : {}),
       ...(tool.inline !== undefined ? { inline: tool.inline } : {}),
       ...(tool.scriptsOnly ? { scriptsOnly: true } : {}),
+      // As its latest report says: a tool that stopped declaring its files is approved whole again.
+      ...(tool.approvalFiles?.length ? { approvalFiles: tool.approvalFiles } : {}),
     });
   }
   const sorted = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));

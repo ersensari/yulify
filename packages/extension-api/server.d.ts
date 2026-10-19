@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import type { Router, json, raw, text } from "express";
+import type { Request, Response, Router, json, raw, text } from "express";
 
 /** A chat, as an extension's server half is told of it. */
 export interface Chat {
@@ -58,6 +58,23 @@ export interface Unsaved {
  * For `failed`, `errno` on the error is the system's own code (`ENOSPC`,
  * `EACCES`, `EROFS`…) and `cause` the error it gave.
  */
+/** A folder the agents work in: see `folders`. */
+export interface AgentFolder {
+  path: string;
+  /** Its agent's name for an agent's home, else its place under the workspace root. */
+  name: string;
+  kind: "agent" | "project" | "chat";
+  /** The first agent's home, which the sidebar calls Home. */
+  home?: true;
+}
+
+/**
+ * A file opened by `files.open`, to read from `fd` and send. `mimeType` is what
+ * its first bytes say it is where it is a picture (PNG, JPEG, GIF, WebP) or a
+ * clip a browser plays (WebM, MP4), whatever it is called; absent for any other.
+ */
+export type OpenedFile = { fd: number; size: number; name: string; mtime: number; change: string; mimeType?: string };
+
 export type FileRefusal = "invalid" | "missing" | "conflict" | "exists" | "too_large" | "failed" | "unsaved";
 
 /** What opens a file for `files.open` and `files.readBytes`, beyond the checks every path gets. */
@@ -167,6 +184,31 @@ export interface ServerPortal {
    * does with it. Those that build on it start after it, and are stopped before it and started again whenever it is.
    */
   provide(factory: (consumer: { name: string }) => unknown): void;
+  /**
+   * The folders the agents work in, each by its real path: what a server half
+   * that keeps something for what the agents made there (a gallery) looks
+   * through, and hears of when one goes.
+   */
+  folders: {
+    /** Every agent's home, every project, and every folder a chat of any kind works in, each once, with what the person calls it. One that is gone is not listed. */
+    list(): AgentFolder[];
+    /** Whether a folder, by its real path, is one the agents may work in: an agent's home, or one inside the workspace root. Only from one of these is what the agents made there to be served. */
+    allowed(folder: string): boolean;
+    /** The portal deleted one: a project with its folder, or an agent with its home. `folder` is where it really was, as `list` named it. */
+    on(event: "removed", handler: (folder: string) => void): void;
+  };
+  tools: {
+    /**
+     * Says which of the tools its pi extension registers (`chats.extend`) it
+     * offers now, where that follows its settings: image generation, say,
+     * once somebody has set up where pictures are made. Settings → Tools then
+     * lists those before any chat has reported them, and leaves out the ones
+     * it remembers that are not offered. Asked each time a list is drawn, so
+     * keep it quick. After a change, `chats.reload()` gives it to the chats
+     * that are open.
+     */
+    offer(tools: () => { name: string; description?: string }[]): void;
+  };
   extensions: {
     /**
      * What an extension this one builds on gives it (see `provide`): one its package.json names in `pithagoras.requires`,
@@ -195,6 +237,16 @@ export interface ServerPortal {
      * stops the watching, for a response that ended by itself.
      */
     endWithLogin(end: () => void): () => void;
+    /**
+     * Sends a file opened by `files.open` as the portal sends its own: with
+     * its type, a policy that keeps it from running anything, a version a
+     * browser revalidates (304), and the part a player asks for (`Range`).
+     * A file with no `mimeType` is sent to be saved, under its name, and never
+     * shown. `cache` is the Cache-Control (default `private, no-cache`); with
+     * `download`, a file name, any file is sent to be saved. Closes the file
+     * once sent, or at once when the response is gone already.
+     */
+    send(req: Request, res: Response, file: Pick<OpenedFile, "fd" | "size" | "name" | "mimeType">, options?: { cache?: string; download?: string }): void;
   };
   chats: {
     get(id: string): Chat | undefined;
@@ -226,10 +278,19 @@ export interface ServerPortal {
     /** To the package's own pi extension in a chat, starting its pi if need be. False where pi does not run in the portal. */
     tell(chatId: string, data: unknown): Promise<boolean>;
     /**
+     * Loads every chat's pi that is idle again, as switching a package on or
+     * off does: each then has what the server halves add to it now. A chat
+     * that is working, compacting or being edited is left as it is until then,
+     * and counted as `waiting`.
+     */
+    reload(): Promise<{ reloaded: number; waiting: number }>;
+    /**
      * A pi extension of the package's, made here: registered in every chat's
      * pi as it starts, so its tools hold what this module holds. Only where pi
      * runs in the portal's own process. A tool registered with
-     * `offByDefault: true` is off in every chat until somebody switches it on.
+     * `offByDefault: true` is off in every chat until somebody switches it on,
+     * and one with `approvalFiles` (names of its parameters that hold files)
+     * is approved for those files, each on its own.
      */
     extend(factory: (pi: any, chat: Chat) => void): void;
     /**
@@ -357,9 +418,17 @@ export interface ServerPortal {
     /**
      * A plain file opened once, to read or send: read from `fd`, not from the path again, and with its `mtime` and
      * `change` as they were when it was opened. A file kept open this way is the file the name had then, whatever
-     * is put in its place after. The caller closes it.
+     * is put in its place after. `mimeType` says what it is by its first bytes, for a picture or a clip; what it may
+     * be is the caller's to decide. The caller closes it.
      */
-    open(base: string, rel: string, options?: FileOpenOptions): { fd: number; size: number; name: string; mtime: number; change: string };
+    open(base: string, rel: string, options?: FileOpenOptions): OpenedFile;
+    /**
+     * Keeps `data` as a new file called `name` in the folder `rel`: what a
+     * server half makes for the person, a picture say. Written beside its place
+     * and put there whole, never over something that is there: a name that is
+     * taken gets a number ("cat (2).png"). Returns its path, from `base`.
+     */
+    create(base: string, rel: string, name: string, data: Buffer): string;
   };
   git: {
     /**

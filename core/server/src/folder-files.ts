@@ -1,4 +1,6 @@
+import { closeSync } from "node:fs";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
+import { mediaTypeAt } from "./output-files.js";
 import {
   folderIdentity,
   folderPath,
@@ -12,6 +14,7 @@ import {
   renameEntry,
   renameFile,
   resolveInside,
+  saveNewFile,
   sweepTemp,
   unsavedAt,
   writeText,
@@ -42,5 +45,16 @@ export const folderFiles: ServerPortal["files"] = {
   folder: (base, rel, options = {}) => folderPath(base, rel, options),
   identity: (base, rel, options = {}) => folderIdentity(base, rel, options),
   sweepTemp: (base, rel, options = {}) => sweepTemp(base, rel, options.olderThanMs, { likeParent: options.likeParent, chats: options.chats }),
-  open: (base, rel, options = {}) => openFile(base, rel, options),
+  // What it is by its bytes, for the half to decide what it takes.
+  open: (base, rel, options = {}) => {
+    const opened = openFile(base, rel, options);
+    try {
+      const mimeType = mediaTypeAt(opened.fd);
+      return mimeType ? { ...opened, mimeType } : opened;
+    } catch (e) {
+      closeSync(opened.fd);
+      throw e;
+    }
+  },
+  create: (base, rel, name, data) => saveNewFile(base, rel, name, data),
 };

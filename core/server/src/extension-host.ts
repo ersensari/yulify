@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync } from "node:fs";
+import { closeSync, mkdirSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import semver from "semver";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { agentOf, defaultAgent, listAgents } from "./agents.js";
 import { DATA_DIR } from "./data-dir.js";
-import { getSession, listSessions, sessionsByWorkspace, type SessionRow } from "./db.js";
+import { getSession, listSessions, sessionsByWorkspace, setServerHalfOffers, type SessionRow } from "./db.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
 import type { ServerHalf } from "./extension-ui.js";
 import { asAgent, runAsAgent, sandboxEnv } from "./sandbox/exec.js";
@@ -15,9 +15,11 @@ import { identityOf } from "./sandbox/identity.js";
 import { sandboxOn, sandboxSupport } from "./sandbox/policy.js";
 import { folderFiles } from "./folder-files.js";
 import { baseDir, setAgentAccess, type AgentAccess } from "./workspace-files.js";
+import { sendFile } from "./api/files.js";
 import { watchStream } from "./login-streams.js";
 import { personsEnv } from "./background.js";
 import { gitAt } from "./git.js";
+import { folderAllowed, listFolders } from "./agent-folders.js";
 import type { Chat, ChatLife as Life, Ran, ServerPortal, Upgrade } from "@pithagoras/extension-api/server";
 
 /**
@@ -98,7 +100,34 @@ interface Running {
   uses: Set<string>;
   /** Its file's revision and those of all it builds on, as it started: a change in any is a start anew. See plan. */
   sig: string;
+  /** The tools its pi extension registers now, where that follows its settings (`tools.offer`). */
+  offers?: () => OfferedTool[];
+  /** What it is told when the portal deletes a folder the agents work in (`folders.on("removed")`). */
+  removed: ((folder: string) => void)[];
 }
+
+/** The portal deleted a folder the agents worked in, `folder` being where it really was: each server half is told. */
+export function folderRemoved(folder: string): void {
+  for (const ext of running.values()) for (const told of ext.removed) guarded(ext.half.name, "hearing of a folder that was removed", () => told(folder));
+}
+
+/** A tool a server half says it offers now: see `tools.offer`. */
+type OfferedTool = { name: string; description?: string };
+
+/**
+ * What each running server half that follows its settings offers now, by its name: the tools lists read it (shownTools).
+ * One whose answer fails is left out, as if it had said nothing: its tools are listed as they were remembered.
+ */
+export function offeredTools(): Map<string, OfferedTool[]> {
+  const offered = new Map<string, OfferedTool[]>();
+  for (const ext of running.values()) {
+    if (!ext.offers) continue;
+    const said = guarded(ext.half.name, "saying which tools it offers", () => ext.offers!());
+    if (Array.isArray(said)) offered.set(ext.half.name, said.filter((t) => typeof t?.name === "string" && t.name !== ""));
+  }
+  return offered;
+}
+setServerHalfOffers(offeredTools);
 
 const running = new Map<string, Running>();
 /** Why a package's server half is not running, by the package's name. */
@@ -158,9 +187,11 @@ function wire(name: string, data: unknown): string | undefined {
 /** How the host reaches what only the session manager can do, which it cannot import: the manager imports it. */
 let tellChat: (chatId: string, extension: string, data: unknown) => Promise<boolean> = async () => false;
 let toolOffered: (chatId: string, tool: string) => "direct" | "lazy" | undefined = () => undefined;
-export function setChatBridge(bridge: { tell: typeof tellChat; offers: typeof toolOffered }): void {
+let reloadChats: () => Promise<{ reloaded: number; waiting: number }> = async () => ({ reloaded: 0, waiting: 0 });
+export function setChatBridge(bridge: { tell: typeof tellChat; offers: typeof toolOffered; reload: typeof reloadChats }): void {
   tellChat = bridge.tell;
   toolOffered = bridge.offers;
+  reloadChats = bridge.reload;
 }
 
 function whoOf(chatId: string) {
@@ -203,6 +234,20 @@ function portalFor(ext: Running): ServerPortal {
       if (typeof factory !== "function") throw new TypeError("provide takes a function: (consumer) => what that consumer is given");
       ext.provider = factory;
     },
+    folders: {
+      list: () => listFolders(),
+      allowed: (folder) => folderAllowed()(folder),
+      on(event, handler) {
+        if (event !== "removed") throw new TypeError(`There is no folder event "${String(event)}": there is "removed"`);
+        ext.removed.push(handler);
+      },
+    },
+    tools: {
+      offer(names) {
+        if (typeof names !== "function") throw new TypeError("offer takes a function: () => the tools offered now");
+        ext.offers = names;
+      },
+    },
     extensions: {
       use(of) {
         if (ext.half.requires?.[of] === undefined && ext.half.optional?.[of] === undefined) {
@@ -224,6 +269,9 @@ function portalFor(ext: Running): ServerPortal {
         ext.upgrade = handler;
       },
       endWithLogin: watchStream,
+      // A file of no type said is sent as bytes, to be saved: it is drawn by nothing.
+      send: (req, res, file, options = {}) =>
+        sendFile(req, res, { ...file, mimeType: file.mimeType ?? "application/octet-stream" }, options.cache ?? "private, no-cache", options.download ?? (file.mimeType ? undefined : file.name)),
     },
     chats: {
       get: (id) => {
@@ -259,6 +307,7 @@ function portalFor(ext: Running): ServerPortal {
       on: (event, handler) => void ext.life.on(event, handler),
       onEvent: (handler) => void ext.events.push(handler),
       tell: (chatId, data) => tellChat(chatId, name, data),
+      reload: () => reloadChats(),
       offers: (chatId, tool) => toolOffered(chatId, tool),
       extend: (factory) => void ext.factories.push(factory),
       hold: (chatId) => {
@@ -305,7 +354,7 @@ async function stop(ext: Running): Promise<void> {
 }
 
 async function start(half: ServerHalf, sig: string, uses: Set<string>): Promise<void> {
-  const ext: Running = { half, router: express.Router(), stops: [], opens: [], life: new EventEmitter(), events: [], factories: [], holds: new Map(), apis: new Map(), uses, sig };
+  const ext: Running = { half, router: express.Router(), stops: [], opens: [], life: new EventEmitter(), events: [], factories: [], holds: new Map(), apis: new Map(), uses, sig, removed: [] };
   try {
     // By its revision: the same file changed is another module, and the one already loaded is not served again.
     const stopper = await within(
