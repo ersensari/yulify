@@ -1,14 +1,16 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inlineBrowserScreenshot } from "./browser-screenshot.js";
 import { cleanBrowserSnapshot, isBrowserSnapshot } from "./browser-snapshot-format.js";
 import { bareRef } from "../browser/ref.js";
-import { listToolRules, mcpView, recordAudit, trustResult, trustedResults, useGrant, type McpView, type ToolRule } from "../db.js";
+import { listToolRules, mcpView, recordAudit, trustResult, trustedMcpServers, trustedResults, useGrant, type McpView, type ToolRule } from "../db.js";
 import { injectionSignals, type Signal } from "./injection.js";
 import { PORTAL_BROWSER_TOOLS, mcpServerOf } from "../tool-policy.js";
+import { DATA_DIR } from "../data-dir.js";
+import { piAgentDir } from "../pi-settings.js";
 import { isWithinText, pathBelow, realPath, realPathAhead } from "../within.js";
 import { agentsRoot, listAgents } from "../agents.js";
 import { workspaceRoot } from "../workspaces.js";
@@ -53,11 +55,38 @@ const UNTRUSTED_COMMAND = /\b(himalaya|mutt|neomutt|notmuch|offlineimap|mbsync|c
  * read through a command, an MCP server the portal does not control, and the
  * browser, which reads pages anyone can write. The agent's own tools, a
  * subagent's answer and a routine's included, do not mark the conversation.
+ *
+ * A server's tools are its words however they are called: through the adapter's
+ * `mcp` tool, or under their own names (`jira_get_issue`), which the adapter
+ * registers where a server's tools are direct and the tools gateway runs where
+ * they are lazy. An issue comment or a mail body a server hands back is whoever
+ * wrote it. A server the person counts as their own (trustedMcpServers) is not
+ * outside content, by any of those ways; the browser always is, whoever runs it.
  */
-function untrustedResult(toolName: string, input: Record<string, unknown>): boolean {
+function untrustedResult(toolName: string, input: Record<string, unknown>, fromAdapter: boolean): boolean {
   if (toolName === "bash") return UNTRUSTED_COMMAND.test(cmd(input));
   if (browserCall(toolName, input).isBrowser) return true;
-  return /^mcp(_|$)/.test(toolName);
+  // A script runs any tool of any server, and says which only as it runs.
+  if (/^mcp_/.test(toolName)) return true;
+  const trusted = (server: string | undefined) => server !== undefined && trustedMcpServers().has(server);
+  const mcp = mcpView();
+  if (toolName === "mcp") return !trusted(proxiedServer(input, mcp.servers));
+  // A tool the adapter registered is a server's whatever it is called (the adapter can name them without the
+  // server, and merges servers from configs other than the portal's), and one whose server is not told is no trusted one's.
+  return (fromAdapter || mcp.serverTool(toolName)) && !trusted(mcpServerOf(toolName, mcp.servers));
+}
+
+/**
+ * The server whose tool an `mcp` call runs, as configured: the one it names, or the one the tool's name is of.
+ * Undefined for a call that runs no tool (a search or a list, which hands back what every server says of itself),
+ * and for a tool of no server that is configured.
+ */
+function proxiedServer(input: Record<string, unknown>, servers: readonly string[]): string | undefined {
+  const same = (name: string) => name.trim().replace(/[-.]/g, "_");
+  const asked = typeof input.tool === "string" ? same(input.tool) : "";
+  if (!asked) return undefined;
+  if (typeof input.server === "string" && input.server.trim()) return servers.find((server) => same(server) === same(input.server as string));
+  return mcpServerOf(asked, servers);
 }
 
 /**
@@ -124,11 +153,17 @@ export function switchedOffVia(
   return undefined;
 }
 
+/** What a rule is told of where a call is made: the folder the conversation works in, and the files the tool declares (see declaredFiles). */
+interface RuleContext {
+  workspace?: string;
+  files?: readonly string[];
+}
+
 interface Rule {
   name: string;
   why: string;
   /** True when this call is the dangerous shape. */
-  hit: (toolName: string, input: Record<string, unknown>) => boolean;
+  hit: (toolName: string, input: Record<string, unknown>, context: RuleContext) => boolean;
 }
 
 const cmd = (input: Record<string, unknown>) =>
@@ -145,8 +180,7 @@ const target = (input: Record<string, unknown>) =>
 /** Directories on PATH: a file here is executed later, by something else. */
 const PATH_DIRS = /(^|[^\w/])(\/data\/bin|\/usr\/local\/bin|\/usr\/bin|\/usr\/local\/sbin)(?=\/|[\s'"]|$)/;
 
-const PERSIST_PATHS = /(?:\/etc\/(?:cron\.[a-z]+|systemd\/system)|(?:~|\/[^\s]+)\/\.config\/(?:autostart|systemd\/user)|(?:~|\/[^\s]+)\/\.(?:bashrc|bash_profile|zshrc|zprofile|profile))(?=\/|[\s'"]|$)/;
-const writesFiles = (command: string) => /(>|\b(?:cp|mv|install|tee)\b)/.test(command);
+const PERSIST_PATHS = /(?:\/etc\/(?:cron\.[a-z]+|systemd\/system)|(?:~|(?:\/[^\s/]+)+)\/\.config\/(?:autostart|systemd\/user)|(?:~|(?:\/[^\s/]+)+)\/\.(?:bashrc|bash_profile|zshrc|zprofile|profile))(?=\/|[\s'"]|$)/;
 
 /**
  * What a token or a credentials file is called, by its name and not by the
@@ -157,10 +191,27 @@ const writesFiles = (command: string) => /(>|\b(?:cp|mv|install|tee)\b)/.test(co
  */
 const SECRET_NAMES = /(?:^|[/\s'"=*$.{])\.?(?:\w*[_-])?(?:token|(?:[\w-]*[_-])?credentials)(?:\.(?:json|txt|ya?ml))?(?=$|[\s'"*}])/i;
 
-/** Whether a call reads a place where secrets are kept: the command, or the path. */
-function readsCredentials(tool: string, input: Record<string, unknown>): boolean {
-  const where = tool === "bash" ? cmd(input) : target(input);
-  return /(auth\.json|\.secrets|\.env\b|id_(?:rsa|dsa|ecdsa|ed25519)|\.ssh\/|\.netrc)/i.test(where) || SECRET_NAMES.test(where);
+/** The values of the parameters a tool declares as its files (see declaredFiles): each path it is given. */
+const declaredValues = (input: Record<string, unknown>, files: readonly string[] | undefined): string[] =>
+  (files ?? []).flatMap((name) => {
+    const value = input[name];
+    return (Array.isArray(value) ? value : [value]).filter((one): one is string => typeof one === "string");
+  });
+
+/** Where secrets are kept, by a path's name: keys, tokens, and the folders tools keep their logins in. */
+const SECRET_PLACES =
+  /(?<![\w.-])(?:auth\.json|\.secrets(?=$|[\s'"*}/])|id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:ssh|aws|kube|gnupg)(?=\/|$|[\s'"*}])|\.docker\/config\.json|\.config\/(?:gh|gcloud|hub)(?=\/|$|[\s'"*}])|\.netrc)|(?<![\w$])\.env(?:\.(?!(?:example|sample|template|dist|defaults?)\b)[\w-]+)*(?=$|[\s'"*}/;)])/i;
+
+/** Whether a call reads a place where secrets are kept: the command, or the path, and each file a tool declares (`files`). */
+function readsCredentials(tool: string, input: Record<string, unknown>, files?: readonly string[]): boolean {
+  const secret = (where: string) => SECRET_PLACES.test(where) || SECRET_NAMES.test(where);
+  if (tool !== "bash") return secret(target(input)) || declaredValues(input, files).some(secret);
+  const command = cmd(input);
+  // gh hands its token out by more than one spelling.
+  if (/\bgh\s+auth\s+(?:token\b|status\b[^|;&\n]*(?:--show-token|\s-t\b))/.test(command)) return true;
+  // A command by its words, each a place or a name: a word with a blank in it is a message or a search, not a place
+  // (`git commit -m "fix token refresh"`); and the code an interpreter runs, which names places inside its own text.
+  return lexShell(command, undefined).some((one) => [one.program, ...one.args, ...one.writes].some((word) => !/\s/.test(word) && secret(word)) || secret(codeOf(one)));
 }
 
 /** The options git takes before the subcommand that read the next word as their value (the others, `--no-pager` or `-p`, stand alone). */
@@ -169,73 +220,839 @@ const GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", 
 /**
  * `git push`, with whatever git's own options stand between: `git -C repo push`,
  * `git -c color.ui=never push`, `git --git-dir=x --no-pager push`. A model writes
- * them whenever the repository is not its working folder. Read word by word and not
- * by one pattern: options before a subcommand can be told apart from it only by
- * knowing which of them take a value, and a pattern for that backtracks without end.
+ * them whenever the repository is not its working folder. Read by the commands of the
+ * line (see lexShell), so that a message or a document that names `git push` is not one.
  */
 function pushesGit(command: string): boolean {
-  for (const found of command.matchAll(/\bgit\b/g)) {
-    const words = command.slice(found.index + 3).match(/(?:"[^"]*"|'[^']*'|[^\s"'])+/g) ?? [];
+  return lexShell(command, undefined).some(({ name, args }) => {
+    if (name !== "git") return false;
     let at = 0;
-    while (at < words.length && words[at].startsWith("-")) at += GIT_OPTIONS_WITH_VALUE.has(words[at]) ? 2 : 1;
-    if (at < words.length && /^push(?![\w-])/.test(words[at])) return true;
-  }
-  return false;
+    while (at < args.length && args[at].startsWith("-")) at += GIT_OPTIONS_WITH_VALUE.has(args[at]) ? 2 : 1;
+    return /^push(?![\w-])/.test(args[at] ?? "");
+  });
 }
+
+/** What schedules work by its command: `crontab` that installs or edits one (not `-l`), `systemd-run`, `at` and `batch`. */
+const schedules = (command: string): boolean =>
+  lexShell(command, undefined).some(
+    ({ name, args }) => (name === "crontab" && !args.some((arg) => /^-[A-Za-z]*[lr]/.test(arg))) || name === "systemd-run" || name === "at" || name === "batch",
+  );
 
 /** curl's short flags that take a value, which swallows the rest of their group: in `-ofile.tar` the `f` is no flag. */
 const CURL_VALUE_FLAGS = "oAbcCeEHKmQrtuUwxXyYzW";
 
-/** Whether a short-flag group has one of `wanted` before a flag that takes the rest as its value: `-sd`, `-sSLd@file`, `-sfT`. */
-function hasShortFlag(command: string, wanted: string): boolean {
-  for (const group of command.matchAll(/(?:^|\s)-([A-Za-z]+)/g)) {
-    for (const flag of group[1]) {
-      if (wanted.includes(flag)) return true;
-      if (CURL_VALUE_FLAGS.includes(flag)) break;
+/**
+ * curl carrying data out: a body (`-d`, `-F`, `-T`, alone or in a group such as `-sd`; `--data*`, `--form`, `--json`,
+ * `--upload-file`) or a method that has one (`-X POST`, `-XPUT`, `--request=PATCH`). Read from its own words.
+ */
+function curlSends(args: string[]): boolean {
+  const bodyMethod = (value: string | undefined) => /^(?:POST|PUT|PATCH)$/i.test(value ?? "");
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (/^--(?:data|form|upload-file|json)\b/.test(arg)) return true;
+    if (arg === "--request" || arg === "--method") {
+      if (bodyMethod(args[i + 1])) return true;
+      continue;
+    }
+    if (/^--(?:request|method)=/.test(arg)) {
+      if (bodyMethod(arg.slice(arg.indexOf("=") + 1))) return true;
+      continue;
+    }
+    if (!/^-[A-Za-z]/.test(arg)) continue;
+    for (let k = 1; k < arg.length; k++) {
+      if ("dFT".includes(arg[k])) return true;
+      if (arg[k] === "X") {
+        if (bodyMethod(k < arg.length - 1 ? arg.slice(k + 1) : args[i + 1])) return true;
+        break;
+      }
+      if (CURL_VALUE_FLAGS.includes(arg[k])) break;
     }
   }
   return false;
 }
 
-/**
- * curl or wget carrying data out: a body (`-d`, `-F`, `-T` alone or in a group such
- * as `-sd`, `--data*`, `--form`, `--json`, `--upload-file`, `--post-data`,
- * `--post-file`, `--body-data`, `--body-file`) or a method that has one. wget's
- * short flags are not looked at: its `-d` is debug and its `-nd` no directories.
- */
+/** wget carrying data out: `--post-data`, `--post-file`, `--body-data`, `--body-file`, or a method that has one. Its short flags are not looked at: its `-d` is debug. */
+const wgetSends = (args: string[]): boolean =>
+  args.some((arg, i) => /^--(?:post-data|post-file|body-data|body-file)\b/.test(arg) || (/^--method(?:=|$)/.test(arg) && /^(?:POST|PUT|PATCH)$/i.test(arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : (args[i + 1] ?? ""))));
+
+/** curl or wget carrying data out (see curlSends, wgetSends), in any command of the line. */
 function sendsData(command: string): boolean {
-  const withBody = /--(?:data|form|upload-file|json|post-data|post-file|body-data|body-file)\b/;
-  const withMethod = /(?:--request|--method)(?:\s+|=)["']?(?:POST|PUT|PATCH)\b|(?:^|\s)-[A-Za-z]*X\s*["']?(?:POST|PUT|PATCH)\b/i;
-  if (/\bcurl\b/.test(command) && (hasShortFlag(command, "dFT") || withBody.test(command) || withMethod.test(command))) return true;
-  return /\bwget\b/.test(command) && (withBody.test(command) || withMethod.test(command));
+  return lexShell(command, undefined).some(({ name, args }) => (name === "curl" && curlSends(args)) || (name === "wget" && wgetSends(args)));
+}
+
+/**
+ * One simple command of a command line, as far as its words say: a shell is read here, not run, so this is what a
+ * line says on its face, which is what a model writes.
+ */
+interface SimpleCommand {
+  /** Whether it takes the output of the one before it through a pipe. */
+  piped: boolean;
+  /** The word it is run by, as written (`./install.sh`). */
+  program: string;
+  /** What it runs, past the wrappers that run another command (sudo, env, timeout and the like), assignments and keywords. */
+  name: string;
+  /** The words after it, quotes taken off. */
+  args: string[];
+  /** The wrappers it is run through. */
+  via: string[];
+  /** Where its output is sent: what a `>`, `>>` or `&>` that is not quoted names. */
+  writes: string[];
+  /** Whether it is given input from a file (`<`, not `< /dev/null`), or the output of a command in a here-string or a here-document. */
+  fed: boolean;
+  /** The text it is handed to read: here-document bodies and here-strings. */
+  input: string;
+  /** The folder it runs in as far as the line says (a `cd` before it), or undefined where that cannot be told. */
+  dir: string | undefined;
+}
+
+/** The commands that run the command after them, and the letters of their short options that take a value (and how many words of their own they take first). */
+const WRAPPERS: Record<string, { values: string; first?: number }> = {
+  sudo: { values: "ugChpUrtDT" },
+  doas: { values: "uC" },
+  env: { values: "uCS" },
+  nice: { values: "n" },
+  ionice: { values: "cnp" },
+  timeout: { values: "sk", first: 1 },
+  stdbuf: { values: "ioe" },
+  nohup: { values: "" },
+  time: { values: "fo" },
+  command: { values: "" },
+  exec: { values: "a" },
+  setsid: { values: "" },
+  sshpass: { values: "pfdP" },
+  xargs: { values: "IiLlnPdEsa" },
+};
+
+/** Words that open or close a compound command, which run what follows them. */
+const KEYWORDS = new Set(["!", "{", "}", "if", "then", "else", "elif", "do", "while", "until"]);
+
+/** `~`, `~/…` and `$HOME/…` as the shell has them. */
+const homeOf = (word: string) => {
+  const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/.exec(word);
+  return home ? path.join(os.homedir(), word.slice(home[0].length)) : word;
+};
+
+/** The shells, and the interpreters that run what they read from their input when they are given nothing else to run. */
+const SHELLS = /^(?:ba|z|d|k|fi)?sh$/;
+const INTERPRETERS = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|deno|bun)$/;
+
+/** How deep substitutions and `sh -c` scripts are read into: deeper than any line a model writes, and a bound on the work. */
+const LEX_DEPTH = 8;
+
+/** A command line's simple commands: see lexFrom. `dir` is the folder the line starts in, where it is known. */
+function lexShell(command: string, dir: string | undefined, depth = 0): SimpleCommand[] {
+  return lexFrom(command, 0, dir, depth).commands;
+}
+
+/**
+ * The simple commands of a command line from `start`, read as a shell reads them on their face: words split at
+ * unquoted blanks, with quotes and backslashes taken off; commands split at unquoted `|`, `;`, `&`, `&&`, `||`, line
+ * breaks and parentheses (a line break after a pipe or an operator only continues the line); redirects taken out of
+ * the words; arithmetic (`$((…))`) kept as a word; a command substitution (`$(…)`, backticks, in double quotes too)
+ * read as commands of its own and kept as the word it stands in; here-document bodies kept as the input of the
+ * command they are given to, and read as commands where that is a shell; comments skipped; a `cd` followed for the
+ * commands after it (and undone at the end of a subshell); and the script of `sh -c` (`bash -lc`, `sudo sh -c`) read
+ * as commands of its own. With `until`, it stops at the `)` or backtick that ends the substitution it reads, and says
+ * where. Not a parser: a `case` pattern's `)` ends a substitution early, which leaves more to be read, not less.
+ */
+function lexFrom(command: string, start: number, dir: string | undefined, depth: number, until?: ")" | "`"): { commands: SimpleCommand[]; end: number } {
+  const commands: SimpleCommand[] = [];
+  const nested: SimpleCommand[] = [];
+  let words: string[] = [];
+  let writes: string[] = [];
+  let fed = false;
+  let input = "";
+  let piped = false;
+  let word = "";
+  let inWord = false;
+  let quotedWord = false;
+  let quote: string | undefined;
+  /** What the next word is the target of: a write, a dup of a descriptor (`>&2`), an input, a here-string, or a here-document's end. */
+  let target: "write" | "dup" | "read" | "here" | "heredoc" | "heredoc-tabs" | undefined;
+  /** The here-documents of the command being read, and those whose bodies come after the next line break. */
+  let opened: { end: string; tabs: boolean; quoted: boolean }[] = [];
+  const bodies: { end: string; tabs: boolean; quoted: boolean; owner: SimpleCommand }[] = [];
+  const dirs: (string | undefined)[] = [];
+  const push = (into: SimpleCommand[], from: SimpleCommand[]) => {
+    for (const one of from) into.push(one);
+  };
+
+  const endWord = () => {
+    if (!inWord) return;
+    const done = word;
+    const quotedDone = quotedWord;
+    word = "";
+    inWord = false;
+    quotedWord = false;
+    const kind = target;
+    target = undefined;
+    if (kind === "write" || (kind === "dup" && !/^(?:\d+|-)$/.test(done))) writes.push(done);
+    else if (kind === "read") fed ||= done !== "/dev/null";
+    else if (kind === "here") {
+      input += `${done}\n`;
+      fed ||= /\$\(|`/.test(done);
+    } else if (kind === "heredoc" || kind === "heredoc-tabs") opened.push({ end: done, tabs: kind === "heredoc-tabs", quoted: quotedDone });
+    else if (kind === undefined) words.push(done);
+  };
+  const endCommand = (nextPiped: boolean) => {
+    endWord();
+    // A redirect with nothing after it names nothing.
+    target = undefined;
+    if (words.length || writes.length || opened.length || input) {
+      const made = commandOf(words, writes, fed, input, piped, dir);
+      commands.push(made);
+      for (const heredoc of opened) bodies.push({ ...heredoc, owner: made });
+      if (made.name === "cd" || made.name === "pushd") {
+        const to = made.args.find((arg) => !arg.startsWith("-"));
+        const goes = to === undefined ? os.homedir() : homeOf(to);
+        dir = /[$`]/.test(goes) || goes === "-" ? undefined : path.isAbsolute(goes) ? path.resolve(goes) : dir === undefined ? undefined : path.resolve(dir, goes);
+      }
+      if (SHELLS.test(made.name) && depth < LEX_DEPTH) {
+        const at = made.args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
+        // What `sh -c` runs is a line of its own, in the same folder; and so is what a shell without one is handed to read.
+        const script = at < 0 ? undefined : made.args.slice(at + 1).find((arg) => !arg.startsWith("-"));
+        if (script !== undefined) push(commands, lexShell(script, dir, depth + 1));
+        else if (made.input) push(commands, lexShell(made.input, dir, depth + 1));
+      }
+    }
+    words = [];
+    writes = [];
+    opened = [];
+    fed = false;
+    input = "";
+    piped = nextPiped;
+  };
+  const empty = () => !inWord && !words.length && !writes.length && target === undefined;
+  /** A substitution from `at` (its `$(` or backtick), read as commands of its own; the word it stands in keeps its text. */
+  const substitute = (at: number, open: number, close: ")" | "`"): number => {
+    if (depth >= LEX_DEPTH) return at + open - 1;
+    const inner = lexFrom(command, at + open, dir, depth + 1, close);
+    push(nested, inner.commands);
+    word += command.slice(at, inner.end + 1);
+    inWord = true;
+    return inner.end;
+  };
+  /** Arithmetic from `at`, to the `))` that closes it: a value, not commands. */
+  const arithmetic = (at: number): number => {
+    let level = 0;
+    for (let k = at; k < command.length; k++) {
+      if (command[k] === "(") level++;
+      else if (command[k] === ")" && --level === 0) return k;
+    }
+    return command.length - 1;
+  };
+
+  let i = start;
+  for (; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+      else word += c;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = undefined;
+      else if (c === "\\" && i + 1 < command.length && '"\\$`\n'.includes(command[i + 1])) {
+        if (command[i + 1] !== "\n") word += command[i + 1];
+        i++;
+      } else if (c === "$" && command.startsWith("$((", i)) {
+        const end = arithmetic(i + 1);
+        word += command.slice(i, end + 1);
+        i = end;
+      } else if (c === "$" && command[i + 1] === "(") i = substitute(i, 2, ")");
+      else if (c === "`") i = substitute(i, 1, "`");
+      else word += c;
+      continue;
+    }
+    if (until !== undefined && c === until && (until === "`" || !dirs.length)) break;
+    if (c === "'" || c === '"') {
+      quote = c;
+      inWord = true;
+      quotedWord = true;
+      continue;
+    }
+    if (c === "\\" && i + 1 < command.length) {
+      // A backslash before a line break continues the line; before a word, it quotes it.
+      if (command[i + 1] !== "\n") {
+        word += command[i + 1];
+        inWord = true;
+        quotedWord = true;
+      }
+      i++;
+      continue;
+    }
+    if (c === "#" && !inWord) {
+      while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+      continue;
+    }
+    if (c === " " || c === "\t") {
+      endWord();
+      continue;
+    }
+    if (c === "\n") {
+      // Only a line break that ends a command ends one: after a pipe or an operator the command goes on.
+      if (!empty() || opened.length) endCommand(false);
+      // A here-document's body is text for the command it is given to, up to the line that ends it.
+      while (bodies.length) {
+        const { end, tabs, quoted, owner } = bodies.shift()!;
+        const lines: string[] = [];
+        for (;;) {
+          const next = command.indexOf("\n", i + 1);
+          const line = command.slice(i + 1, next < 0 ? command.length : next);
+          i = next < 0 ? command.length : next;
+          if ((tabs ? line.replace(/^\t+/, "") : line) === end) break;
+          lines.push(line);
+          if (next < 0) break;
+        }
+        const body = lines.join("\n");
+        owner.input += `${body}\n`;
+        // Unquoted, a body has its substitutions run: what they put there is not what the model wrote.
+        if (!quoted && /\$\(|`/.test(body)) owner.fed = true;
+        if (SHELLS.test(owner.name) && !owner.args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg)) && depth < LEX_DEPTH) push(commands, lexShell(body, owner.dir, depth + 1));
+      }
+      continue;
+    }
+    if (c === "|" || c === ";" || c === "&") {
+      if (c === "&" && command[i + 1] === ">") {
+        endWord();
+        target = "write";
+        i += command[i + 2] === ">" ? 2 : 1;
+        continue;
+      }
+      const doubled = command[i + 1] === c;
+      if (doubled || (c === "|" && command[i + 1] === "&")) i++;
+      endCommand(c === "|" && !doubled);
+      continue;
+    }
+    if (c === "$" && command.startsWith("$((", i)) {
+      const end = arithmetic(i + 1);
+      word += command.slice(i, end + 1);
+      inWord = true;
+      i = end;
+      continue;
+    }
+    if (c === "$" && command[i + 1] === "(") {
+      i = substitute(i, 2, ")");
+      continue;
+    }
+    if (c === "`") {
+      i = substitute(i, 1, "`");
+      continue;
+    }
+    if (c === "(" && command[i + 1] === "(" && empty()) {
+      // An arithmetic command: a value, not commands.
+      i = arithmetic(i);
+      continue;
+    }
+    if (c === "(" || c === ")") {
+      endCommand(false);
+      if (c === "(") dirs.push(dir);
+      else if (dirs.length) dir = dirs.pop();
+      continue;
+    }
+    if (c === ">" || c === "<") {
+      // A process substitution is a command of its own.
+      if (command[i + 1] === "(") {
+        endCommand(false);
+        dirs.push(dir);
+        i++;
+        continue;
+      }
+      // A descriptor's number before it (`2>`) is part of the redirect, not a word.
+      if (inWord && !quotedWord && /^\d+$/.test(word)) {
+        word = "";
+        inWord = false;
+      } else endWord();
+      if (c === ">") {
+        if (command[i + 1] === ">" || command[i + 1] === "|") i++;
+        if (command[i + 1] === "&") {
+          i++;
+          target = "dup";
+        } else target = "write";
+      } else if (command.startsWith("<<<", i)) {
+        i += 2;
+        target = "here";
+      } else if (command.startsWith("<<-", i)) {
+        i += 2;
+        target = "heredoc-tabs";
+      } else if (command[i + 1] === "<") {
+        i++;
+        target = "heredoc";
+      } else if (command[i + 1] === ">") {
+        i++;
+        target = "write";
+      } else if (command[i + 1] === "&") {
+        i++;
+        target = "dup";
+      } else target = "read";
+      continue;
+    }
+    word += c;
+    inWord = true;
+  }
+  endCommand(false);
+  push(commands, nested);
+  return { commands, end: Math.min(i, command.length - 1) };
+}
+
+/** A simple command's name and arguments, past assignments, keywords and the wrappers that run another command. */
+function commandOf(words: string[], writes: string[], fed: boolean, input: string, piped: boolean, dir: string | undefined): SimpleCommand {
+  const via: string[] = [];
+  let at = 0;
+  while (at < words.length) {
+    const word = words[at];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || KEYWORDS.has(word)) {
+      at++;
+      continue;
+    }
+    const named = path.basename(word);
+    const wrapper = Object.hasOwn(WRAPPERS, named) ? WRAPPERS[named] : undefined;
+    if (!wrapper) break;
+    via.push(named);
+    at++;
+    let first = wrapper.first ?? 0;
+    while (at < words.length) {
+      const next = words[at];
+      if (next === "--") {
+        at++;
+        break;
+      }
+      if (next.startsWith("--")) {
+        at++;
+        continue;
+      }
+      if (next.startsWith("-") && next.length > 1) {
+        at++;
+        // A letter that takes a value takes the rest of the group, or the next word.
+        for (let k = 1; k < next.length; k++) {
+          if (!wrapper.values.includes(next[k])) continue;
+          if (k === next.length - 1) at++;
+          break;
+        }
+        continue;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(next)) {
+        at++;
+        continue;
+      }
+      if (first > 0) {
+        first--;
+        at++;
+        continue;
+      }
+      break;
+    }
+  }
+  const program = at < words.length ? words[at] : "";
+  return { piped, program, name: path.basename(program), args: words.slice(at + 1), via, writes, fed, input, dir };
+}
+
+/**
+ * A command's options read with the letters and long names that take a value: what is given to each (by its option,
+ * `-o` or `--output`), and the operands, the words that are no option nor an option's value. `--` ends the options.
+ * Long options not named here are taken to stand alone, unless `longTakes` says every one takes a value.
+ */
+function readOptions(args: string[], shortValues: string, longValues: string[] = [], longTakes = false): { operands: string[]; given: (option: string) => string[] } {
+  const operands: string[] = [];
+  const given = new Map<string, string[]>();
+  const add = (option: string, value: string) => given.set(option, [...(given.get(option) ?? []), value]);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") {
+      for (const rest of args.slice(i + 1)) operands.push(rest);
+      break;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq > 0) add(arg.slice(0, eq), arg.slice(eq + 1));
+      else if (longValues.includes(arg) || longTakes) add(arg, args[++i] ?? "");
+      else add(arg, "");
+      continue;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      for (let k = 1; k < arg.length; k++) {
+        if (!shortValues.includes(arg[k])) {
+          add(`-${arg[k]}`, "");
+          continue;
+        }
+        add(`-${arg[k]}`, k < arg.length - 1 ? arg.slice(k + 1) : args[++i] ?? "");
+        break;
+      }
+      continue;
+    }
+    operands.push(arg);
+  }
+  return { operands, given: (option) => given.get(option) ?? [] };
+}
+
+/** The name a download is saved under where it is not given one: the last part of the address's path. */
+function savedAs(url: string): string | undefined {
+  try {
+    return path.posix.basename(new URL(url).pathname) || "index.html";
+  } catch {
+    return undefined;
+  }
+}
+
+/** The files a download command saves to, by its words: curl's `-o` and `-O` (in `--output-dir`), wget's `-O`, or the address's name (in `-P`). */
+function downloadsOf({ name, args }: SimpleCommand): string[] {
+  if (name === "curl") {
+    const { operands, given } = readOptions(args, CURL_VALUE_FLAGS, ["--output", "--output-dir", "--url", "--config"]);
+    const saved = [...given("-o"), ...given("--output")];
+    // `-O` saves each address under its own name, in `--output-dir` if it is given.
+    if (given("-O").length || given("--remote-name").length || given("--remote-name-all").length) {
+      const folder = given("--output-dir")[0];
+      for (const url of [...operands, ...given("--url")]) {
+        const named = savedAs(url);
+        if (named) saved.push(folder ? path.join(folder, named) : named);
+      }
+    }
+    return saved;
+  }
+  if (name === "wget") {
+    const { operands, given } = readOptions(args, "OoaiBetTwQUlARDIXP", ["--output-document", "--directory-prefix"]);
+    const named = [...given("-O"), ...given("--output-document")];
+    if (named.length) return named.filter((file) => file !== "-");
+    // Without a name of its own a download keeps the address's, in `-P` if it is given.
+    const folder = [...given("-P"), ...given("--directory-prefix")][0];
+    const saved = folder ? [folder] : [];
+    for (const url of operands) {
+      const file = savedAs(url);
+      if (file) saved.push(folder ? path.join(folder, file) : file);
+    }
+    return saved;
+  }
+  return [];
+}
+
+/** The code an interpreter is given to run on its face: what its `-c`, `-e` (and `-E`, `-p`, `-r`) options carry, and what it is handed to read. */
+function codeOf({ name, args, input }: SimpleCommand): string {
+  if (!INTERPRETERS.test(name)) return "";
+  const code: string[] = [input];
+  for (let i = 0; i < args.length; i++) {
+    const option = /^-[A-Za-z]*[cepEr]$/.exec(args[i]);
+    if (option) code.push(args[++i] ?? "");
+    else if (/^-[A-Za-z]*[ce]./.test(args[i])) code.push(args[i].replace(/^-[A-Za-z]*?[ce]/, ""));
+  }
+  return code.join("\n");
+}
+
+/** Whether an interpreter's arguments give it nothing to run but its input: options alone, none of which is a script, a module or code. */
+const runsInput = (args: string[]) => args.every((arg) => arg === "-" || (arg.startsWith("-") && !/^-[A-Za-z]*[cmeEpr]/.test(arg) && !/^--(?:eval|print|require|import|command|module)\b/.test(arg)));
+
+/**
+ * What runs as a program from the network or from another command's output: a pipe into a shell, a pipe into an
+ * interpreter given nothing to run but its input (`| python3`, `| python3 -`, and not `| python3 -m json.tool`), the
+ * input of xargs made the code of what it runs, a shell, `source` or `eval` handed the output of a download
+ * (`sh -c "$(curl …)"`, `bash <(curl …)`, `bash <<< "$(curl …)"`), and a download run in the same line, by a shell or
+ * an interpreter or as the program itself (`curl -o i.sh … && sh i.sh`).
+ */
+function runsPiped(command: string): boolean {
+  if (/(?:^|[\s;&|(])(?:(?:ba|z|d|k)?sh|source|\.)\s+<\(/.test(command)) return true;
+  if (/(?:\b(?:ba|z|d|k)?sh(?:\s+-\w+)*\s+-[A-Za-z]*c[A-Za-z]*|\beval)\s+["']?(?:\$\(|`)\s*(?:curl|wget)\b/.test(command)) return true;
+  if (/(?:^|[\s;&|(])(?:ba|z|d|k)?sh\b[^|;&\n]*<\s*<\(\s*(?:curl|wget)\b/.test(command)) return true;
+  const fetched = new Set<string>();
+  for (const one of lexShell(command, undefined)) {
+    for (const file of downloadsOf(one)) fetched.add(path.normalize(file));
+    const shell = SHELLS.test(one.name);
+    const runs = shell || INTERPRETERS.test(one.name) || one.name === "source" || one.name === ".";
+    const first = one.args.find((arg) => !arg.startsWith("-"));
+    if ((runs && first !== undefined && fetched.has(path.normalize(first))) || (one.program && fetched.has(path.normalize(one.program)))) return true;
+    if (shell && /(?:\$\(|`)\s*(?:curl|wget)\b/.test(one.input)) return true;
+    if (!one.piped) continue;
+    if (one.via.includes("xargs")) {
+      // What xargs reads becomes the arguments of what it runs: code only where the last of them is a code option.
+      if ((shell || INTERPRETERS.test(one.name)) && /^-[A-Za-z]*[ce]$/.test(one.args[one.args.length - 1] ?? "")) return true;
+      continue;
+    }
+    if (shell || (INTERPRETERS.test(one.name) && runsInput(one.args))) return true;
+  }
+  return false;
+}
+
+/** A place on another machine, as scp and rsync write it: `host:path`, `user@host:path`, `rsync://host/path`. */
+const REMOTE = /^(?:rsync:\/\/|(?:[^\s/@:]+@)?[^\s/:]+:(?!\/\/))/;
+
+/** This machine, by the names a connection to it is made with: what goes there has not left it. */
+const LOOPBACK = /^(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$/i;
+
+/** aws's options that stand alone; every other takes a value. */
+const AWS_FLAGS = new Set(["--recursive", "--dryrun", "--quiet", "--only-show-errors", "--no-progress", "--delete", "--follow-symlinks", "--no-follow-symlinks", "--exact-timestamps", "--size-only", "--no-guess-mime-type", "--force-glacier-transfer", "--ignore-glacier-warnings", "--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager"]);
+
+/** rsync's long options that take a value. */
+const RSYNC_VALUES = ["--exclude", "--include", "--filter", "--rsh", "--rsync-path", "--exclude-from", "--include-from", "--files-from", "--log-file", "--chmod", "--chown", "--port", "--partial-dir", "--backup-dir", "--suffix", "--timeout", "--bwlimit", "--max-size", "--min-size", "--temp-dir", "--password-file", "--compare-dest", "--copy-dest", "--link-dest", "--out-format", "--usermap", "--groupmap", "--info", "--debug", "--contimeout", "--max-delete", "--modify-window", "--block-size"];
+
+/** A script's own request with a body, in the code an interpreter runs. */
+const SCRIPT_SENDS = [
+  /\b(?:requests|httpx|session)\.(?:post|put|patch)\s*\(/i,
+  /\bfetch\s*\((?:[^()]|\([^()]*\))*?\b(?:method\s*:\s*["'`](?:POST|PUT|PATCH)|body\s*:)/i,
+  /\bRequest\s*\([^)]*\b(?:data\s*=|method\s*=\s*["'](?:POST|PUT|PATCH))/,
+  // The first argument ends on a mark, so a run of blanks can be read one way only.
+  /\burlopen\s*\(\s*[^,()\s](?:[^,()]*[^,()\s])?(?:\([^()]*\))?\s*,\s*(?!\w+\s*=)[^)\s]|\burlopen\s*\([^)]*\bdata\s*=/,
+];
+
+/**
+ * What else carries data out of the box than curl and wget: copying to another machine (scp, rsync, sftp's `put`),
+ * a connection fed another command's output or a file (nc, ncat, socat, telnet, ssh; not one to this machine), sending
+ * mail, httpie with a body, a gist or a write through the GitHub API, a copy to a cloud bucket, and a request with a
+ * body in the code an interpreter runs.
+ */
+function sendsElsewhere(command: string): boolean {
+  return lexShell(command, undefined).some((one) => {
+    const { piped, fed, name, args } = one;
+    const code = codeOf(one);
+    if (code && SCRIPT_SENDS.some((pattern) => pattern.test(code))) return true;
+    switch (name) {
+      // A connection that is fed another command's output or a file, to another machine.
+      case "nc":
+      case "ncat":
+      case "netcat":
+      case "telnet": {
+        const { operands, given } = readOptions(args, "wpsiqxXOITVPe");
+        if (given("-U").length) return false;
+        const host = operands[0];
+        return (piped || fed) && !(host !== undefined && LOOPBACK.test(host));
+      }
+      case "socat": {
+        const addresses = args.filter((arg) => !arg.startsWith("-") || arg === "-");
+        const network = addresses.filter((address) => /^(?:TCP|TCP4|TCP6|UDP|UDP4|UDP6|SSL|OPENSSL|SCTP|DCCP|UDPLITE)[:-]/i.test(address));
+        const away = network.some((address) => !LOOPBACK.test(address.split(":")[1] ?? ""));
+        return away && (piped || fed || addresses.some((address) => /^(?:FILE|OPEN|GOPEN|EXEC|SYSTEM|CREATE)[:-]/i.test(address)));
+      }
+      case "ssh":
+        return piped || fed;
+      case "scp": {
+        const { operands } = readOptions(args, "iPoFclSJD");
+        return operands.length > 1 && REMOTE.test(operands[operands.length - 1]);
+      }
+      case "rsync": {
+        const { operands } = readOptions(args, "eBfTM", RSYNC_VALUES);
+        return operands.length > 1 && REMOTE.test(operands[operands.length - 1]);
+      }
+      case "sftp":
+        return /\bput\b/.test(command);
+      case "mail":
+      case "mailx":
+      case "sendmail":
+      case "msmtp":
+      case "ssmtp":
+      case "swaks":
+        return true;
+      case "mutt":
+      case "neomutt":
+        return args.some((arg) => arg === "-s" || arg === "-a") || piped || fed;
+      case "himalaya":
+        return args.some((arg) => ["send", "write", "reply", "forward"].includes(arg));
+      case "http":
+      case "https":
+      case "xh":
+      case "xhs": {
+        // A method with a body, a form, a body from a file or the input, or a request item that is one: `key=value`,
+        // `key:=json`, `field@file`, `@file` (and not `key==query`).
+        const words = args.filter((arg) => !arg.startsWith("-"));
+        return (
+          args.some((arg) => /^(?:POST|PUT|PATCH)$/i.test(arg) || arg === "--form" || arg === "-f") ||
+          words.slice(1).some((word) => /^(?:@|[^\s=:@/]+(?:=(?!=)|:=|@))/.test(word)) ||
+          piped ||
+          fed
+        );
+      }
+      case "gh": {
+        const { operands, given } = readOptions(args, "XfFHpqtR", ["--method", "--field", "--raw-field", "--input", "--header", "--jq", "--template", "--hostname", "--preview", "--cache", "--repo"]);
+        if (operands[0] === "gist" && operands[1] === "create") return true;
+        if (operands[0] !== "api") return false;
+        // A field is a body where gh sends one: with a method that has one, or none, which is a POST; a GraphQL query is a read unless it is a mutation.
+        const method = (given("-X")[0] ?? given("--method")[0] ?? "").toUpperCase();
+        if (given("--input").length) return true;
+        if (method) return ["POST", "PUT", "PATCH"].includes(method);
+        const fields = [...given("-f"), ...given("-F"), ...given("--field"), ...given("--raw-field")];
+        return operands[1] === "graphql" ? fields.some((field) => /\bmutation\b/.test(field)) : fields.length > 0;
+      }
+      case "aws": {
+        const { operands } = readOptions(args.filter((arg) => !AWS_FLAGS.has(arg)), "", [], true);
+        const s3 = operands.indexOf("s3");
+        if (s3 >= 0 && ["cp", "mv", "sync"].includes(operands[s3 + 1])) return (operands[s3 + 3] ?? "").startsWith("s3://");
+        const api = operands.indexOf("s3api");
+        return api >= 0 && ["put-object", "upload-part"].includes(operands[api + 1]);
+      }
+      case "gsutil":
+      case "gcloud": {
+        const operands = args.filter((arg) => !arg.startsWith("-"));
+        const copy = operands.findIndex((word) => ["cp", "mv", "rsync"].includes(word));
+        return copy >= 0 && operands.slice(copy + 2).some((word) => /^(?:gs|s3):\/\//.test(word));
+      }
+      case "rclone": {
+        const operands = args.filter((arg) => !arg.startsWith("-"));
+        return ["copy", "copyto", "sync", "move", "moveto"].includes(operands[0]) && operands.slice(2).some((word) => /^[^/\s:]+:/.test(word));
+      }
+      default:
+        return false;
+    }
+  });
+}
+
+/** Whether a folder is one on the disk; a place that cannot be looked at is not known to be one. */
+function isFolder(place: string): boolean {
+  try {
+    return statSync(place).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The places a command line writes to, as far as its words say, each with the folder it is written from: what a
+ * redirect names; `tee`'s files; what cp, install, ln and rsync write (their last operand or `-t`, and the name each
+ * source keeps in it); all of mv's (a file moved away is changed too); the files of an edit in place (`sed -i`,
+ * `perl -i`, `ruby -i`, not their script); dd's `of=`; a download's file or folder (see downloadsOf); the folder a
+ * clone (`git clone`, `gh repo clone`), an unzip or an untar goes into.
+ */
+function shellWrites(command: string, dir: string | undefined): { place: string; dir: string | undefined }[] {
+  const places: { place: string; dir: string | undefined }[] = [];
+  for (const one of lexShell(command, dir)) {
+    const at = (place: string, from = one.dir) => {
+      if (place) places.push({ place, dir: from });
+    };
+    for (const place of one.writes) at(place);
+    for (const file of downloadsOf(one)) at(file);
+    const { name } = one;
+    // An empty word is no file: macOS's `sed -i ''` gives the suffix as one.
+    const args = one.args.filter((arg) => arg !== "");
+    const copying = (shortValues: string, longValues: string[]) => {
+      const { operands, given } = readOptions(args, shortValues, longValues);
+      const into = [...given("-t"), ...given("--target-directory")];
+      const destination = into[0] ?? operands[operands.length - 1];
+      const sources = into.length ? operands : operands.slice(0, -1);
+      if (destination === undefined) return;
+      at(destination);
+      // Into a folder, each source keeps its name there: a folder by how it is written, by there being more than one
+      // source, or by what is on the disk.
+      const where = homeOf(destination);
+      const resolved = path.isAbsolute(where) ? where : one.dir === undefined ? undefined : path.resolve(one.dir, where);
+      const folder = into.length > 0 || sources.length > 1 || /\/$/.test(destination) || [".", "..", "~"].includes(destination) || (resolved !== undefined && isFolder(resolved));
+      if (folder) for (const source of sources) at(path.join(destination, path.basename(source)));
+    };
+    switch (name) {
+      case "tee":
+        for (const file of readOptions(args, "").operands) at(file);
+        break;
+      case "cp":
+      case "ln":
+        copying("tS", ["--target-directory", "--suffix"]);
+        break;
+      case "install":
+        copying("tSmog", ["--target-directory", "--suffix", "--mode", "--owner", "--group"]);
+        break;
+      case "rsync":
+        copying("eBfTM", RSYNC_VALUES);
+        break;
+      case "mv": {
+        const { operands, given } = readOptions(args, "tS", ["--target-directory", "--suffix"]);
+        for (const file of [...operands, ...given("-t"), ...given("--target-directory")]) at(file);
+        break;
+      }
+      case "sed":
+      case "perl":
+      case "ruby": {
+        if (!args.some((arg) => /^-[A-Za-z]*i/.test(arg) || arg.startsWith("--in-place"))) break;
+        const scriptOptions = name === "sed" ? ["-e", "-f", "--expression", "--file"] : ["-e", "-E"];
+        const { operands, given } = readOptions(args, name === "sed" ? "efl" : name === "perl" ? "eEIMmlFC0x" : "eIrEFC", ["--expression", "--file", "--line-length"]);
+        // The script is an operand of its own only where no -e or -f gives it.
+        const files = scriptOptions.some((option) => given(option).length) ? operands : operands.slice(1);
+        for (const file of files) at(file);
+        break;
+      }
+      case "dd":
+        for (const arg of args) if (arg.startsWith("of=")) at(arg.slice(3));
+        break;
+      case "git": {
+        const { operands, given } = readOptions(args, "Cc", ["--git-dir", "--work-tree"]);
+        if (operands[0] !== "clone") break;
+        const from = given("-C").reduce<string | undefined>((folder, c) => (folder === undefined ? undefined : path.resolve(folder, homeOf(c))), one.dir);
+        const cloned = readOptions(operands.slice(1), "obcju", ["--origin", "--branch", "--config", "--depth", "--reference", "--separate-git-dir", "--template", "--upload-pack", "--jobs"]).operands;
+        const into = cloned[1] ?? (cloned[0] ? path.posix.basename(cloned[0].replace(/\/+$/, "")).replace(/\.git$/, "") : undefined);
+        if (into) at(into, given("-C").length ? from : one.dir);
+        break;
+      }
+      case "gh": {
+        const { operands, given } = readOptions(args, "RDp", ["--repo", "--dir", "--pattern"]);
+        if (operands[0] === "repo" && operands[1] === "clone" && operands[2]) at(operands[3] ?? path.posix.basename(operands[2]).replace(/\.git$/, ""));
+        if (operands[0] === "release" && operands[1] === "download") for (const folder of [...given("-D"), ...given("--dir")]) at(folder);
+        break;
+      }
+      case "unzip":
+        for (const folder of readOptions(args, "dPx").given("-d")) at(folder);
+        break;
+      case "tar": {
+        // Extraction by its mode only: an old-style first word, a dash group with x, or --extract; never by a file's name.
+        const mode = [args[0] && !args[0].startsWith("-") ? args[0] : "", ...args.filter((arg) => /^-[A-Za-z]+$/.test(arg))].join("");
+        const extracts = (/x/.test(mode) || args.includes("--extract") || args.includes("--get")) && !/c/.test(mode) && !args.includes("--create");
+        if (extracts) for (const folder of [...readOptions(args, "CfbTXIL", ["--directory", "--file"]).given("-C"), ...readOptions(args, "CfbTXIL", ["--directory", "--file"]).given("--directory")]) at(folder);
+        break;
+      }
+    }
+  }
+  return places;
+}
+
+/** A shell's start-up file, a schedule or a service: what runs later on its own, by its whole path. */
+const STARTUP = /(?:^|\/)\.(?:bashrc|bash_profile|bash_login|bash_aliases|zshrc|zprofile|zshenv|zlogin|profile)$|^\/etc\/(?:profile\.d\/|cron\.[a-z]+\/|crontab$|systemd\/system\/|bash\.bashrc$|zsh\/)|\/\.config\/(?:autostart|systemd\/user)\//;
+
+/**
+ * Why the places a command line writes to (see shellWrites) include what the portal, pi or the MCP adapter load as the
+ * agent's own (see writesLoadedFiles), or undefined: from the folder each is written from where the line says it,
+ * else by its name alone (a relative place whose folder cannot be told is not taken to be in the portal's own folder).
+ */
+function shellWritesOwn(command: string, workspace: string | undefined): string | undefined {
+  const known: string[] = [];
+  for (const { place, dir } of shellWrites(command, workspace)) {
+    const named = homeOf(place);
+    if (path.isAbsolute(named)) known.push(named);
+    else if (dir !== undefined) known.push(path.resolve(dir, named));
+    else {
+      const entry = loadedAt(named);
+      if (entry) return REFUSAL[entry.as];
+    }
+  }
+  return writesLoadedFiles(known.filter((place) => !place.startsWith("/dev/")), workspace);
+}
+
+/** Whether a command line writes to a shell's start-up file, a schedule or a service (see STARTUP). */
+function shellWritesStartup(command: string, workspace: string | undefined): boolean {
+  return shellWrites(command, workspace).some(({ place, dir }) => {
+    const named = homeOf(place);
+    return STARTUP.test(path.isAbsolute(named) || dir === undefined ? named : path.resolve(dir, named));
+  });
 }
 
 const RULES: Rule[] = [
   {
     name: "pipe-to-shell",
     why: "downloading something and running it unseen",
-    hit: (tool, input) =>
-      tool === "bash" && /\|\s*(sudo\s+)?(ba|z|d)?sh\b/.test(cmd(input)),
+    hit: (tool, input) => tool === "bash" && runsPiped(cmd(input)),
   },
   {
     name: "write-to-path",
     why: "a file on PATH runs later, without anyone asking for it",
-    hit: (tool, input) => {
+    hit: (tool, input, { workspace }) => {
       if (tool === "write" || tool === "edit") return PATH_DIRS.test(target(input) + "/");
       if (tool !== "bash") return false;
-      const c = cmd(input);
-      return PATH_DIRS.test(c) && /(>|>>|\bcp\b|\bmv\b|\binstall\b|\btee\b|-o\s|-O\s)/.test(c);
+      // Where the line writes to, by its words (see shellWrites): a script that only names /usr/bin in its shebang writes nowhere on PATH.
+      return shellWrites(cmd(input), workspace).some(({ place, dir }) => {
+        const named = homeOf(place);
+        return PATH_DIRS.test(`${path.isAbsolute(named) || dir === undefined ? named : path.resolve(dir, named)}/`);
+      });
     },
   },
   {
     name: "upload",
     why: "sending data out of the box",
-    hit: (tool, input) => tool === "bash" && sendsData(cmd(input)),
+    hit: (tool, input) => tool === "bash" && (sendsData(cmd(input)) || sendsElsewhere(cmd(input))),
   },
   {
     name: "read-credentials",
     why: "reading secrets it was not asked about",
-    hit: readsCredentials,
+    hit: (tool, input, { files }) => readsCredentials(tool, input, files),
   },
   {
     name: "publish",
@@ -244,18 +1061,20 @@ const RULES: Rule[] = [
   },
   {
     name: "persist",
-    why: "scheduling work outlives this conversation",
-    hit: (tool, input) =>
+    why: "scheduling work, or changing what the agent loads as its own instructions, tools or code, outlives this conversation",
+    hit: (tool, input, { workspace }) =>
       tool === "routine_create" ||
       tool === "routine_update" ||
-      ((tool === "write" || tool === "edit") && PERSIST_PATHS.test(target(input))) ||
-      (tool === "bash" && (/\b(crontab|systemd-run|at\s+now)\b/.test(cmd(input)) ||
-        (PERSIST_PATHS.test(cmd(input)) && writesFiles(cmd(input))))),
+      ((tool === "write" || tool === "edit") &&
+        (PERSIST_PATHS.test(target(input)) || STARTUP.test(homeOf(target(input))) || writesLoadedFile(target(input), workspace) !== undefined)) ||
+      (tool === "bash" && (schedules(cmd(input)) ||
+        shellWritesStartup(cmd(input), workspace) ||
+        shellWritesOwn(cmd(input), workspace) !== undefined)),
   },
   {
     name: "delegate",
-    why: "a subagent works without these rules, so what it is asked to do is not held to them",
-    hit: (tool) => tool === "subagent",
+    why: "a subagent or a routine works without this conversation's rules, so what it does is not held to them",
+    hit: (tool) => tool === "subagent" || tool === "routine_run",
   },
 ];
 
@@ -379,9 +1198,12 @@ function viaMcp(toolName: string, input: Record<string, unknown>): { toolName: s
 }
 
 /** The rule that refuses this call after untrusted content: the call's own, or that of the tool an `mcp` call reaches. */
-function taintRule(toolName: string, input: Record<string, unknown>): Rule | undefined {
+function taintRule(toolName: string, input: Record<string, unknown>, context: RuleContext): Rule | undefined {
   const reached = viaMcp(toolName, input);
-  return RULES.find((rule) => rule.hit(toolName, input)) ?? (reached ? RULES.find((rule) => rule.hit(reached.toolName, reached.input)) : undefined);
+  return (
+    RULES.find((rule) => rule.hit(toolName, input, context)) ??
+    (reached ? RULES.find((rule) => rule.hit(reached.toolName, reached.input, { workspace: context.workspace })) : undefined)
+  );
 }
 
 /**
@@ -709,6 +1531,22 @@ function unreadable(toolName: string, input: Record<string, unknown>, workspace:
   return undefined;
 }
 
+/**
+ * Why a heartbeat may not have this read, or undefined: a place secrets are kept, by its path or by what a search is
+ * narrowed to (`glob`), and a search through a folder that holds the portal's own (its HOME, with the keys and pi's
+ * `auth.json`, pi's agent folder, the folder of trusted commands' keys), which reads every file in it, hidden ones too.
+ */
+function searchesSecrets(toolName: string, input: Record<string, unknown>, workspace: string | undefined): string | undefined {
+  const secret = "it reads a place where secrets are kept";
+  if (readsCredentials(toolName, input) || (typeof input.glob === "string" && readsCredentials("read", { path: input.glob }))) return secret;
+  if (toolName !== "grep") return undefined;
+  const asked = workspace === undefined ? path.resolve(homeOf(target(input) || ".")) : askedPath(target(input) || ".", workspace);
+  if (asked === undefined) return undefined;
+  const searched = [asked, realPathAhead(asked)];
+  const kept = [os.homedir(), piAgentDir(), path.join(DATA_DIR, ".secrets")].flatMap(forms);
+  return searched.some((where) => kept.some((place) => isWithinText(where, place))) ? secret : undefined;
+}
+
 /** The place as written and as it really is, which is not the same when a link is in the way. */
 const forms = (place: string): string[] => [...new Set([path.resolve(place), realPath(place) ?? path.resolve(place)])];
 
@@ -799,22 +1637,48 @@ function writesInstructions(places: string[], homes?: string[]): string | undefi
  * into a conversation as the agent's own words, for a write there is an
  * instruction to it: see writesInstructions.
  */
-export function unrunnable(toolName: string, input: Record<string, unknown>, workspace: string | undefined): string | undefined {
-  const asPrimary = runsAsPrimary(toolName);
-  if (asPrimary) return asPrimary;
-  if (readsCredentials(toolName, input)) return "it reads a place where secrets are kept";
-  if (toolName !== "bash") {
-    const asked = target(input);
-    if (!asked) return undefined;
-    if (workspace === undefined) return writesInstructions([path.resolve(asked)]);
-    const typed = askedPath(asked, workspace);
-    if (typed === undefined) return undefined;
-    // The folder of this conversation and every agent's home, as written and as they really are.
-    const homes = [workspace, ...listAgents().map((agent) => agent.home)].flatMap((home) => [path.resolve(home), realPath(home) ?? path.resolve(home)]);
-    return writesInstructions([typed, realPathAhead(typed)], homes);
-  }
+export function unrunnable(toolName: string, input: Record<string, unknown>, workspace: string | undefined, files?: readonly string[]): string | undefined {
+  const never = keptFromAll(toolName, input, workspace, files);
+  if (never || toolName !== "bash") return never;
   const command = cmd(input).toLowerCase();
   return PRIVATE_FILES.some((name) => command.includes(name.toLowerCase())) ? "it reads what is private to the primary user" : undefined;
+}
+
+/**
+ * What unrunnable holds for everybody who is not the primary user, a heartbeat included, which looks around for the
+ * primary user on its own and may read their notes: what runs with the primary user's rights, a place secrets are
+ * kept, and a write to what is loaded as the agent's own (the path a tool is given, and each file it declares).
+ */
+function keptFromAll(toolName: string, input: Record<string, unknown>, workspace: string | undefined, files?: readonly string[]): string | undefined {
+  const asPrimary = runsAsPrimary(toolName);
+  if (asPrimary) return asPrimary;
+  if (readsCredentials(toolName, input, files)) return "it reads a place where secrets are kept";
+  // What a command that is allowed writes, by its words: a redirect, a copy, a download, a clone.
+  if (toolName === "bash") return shellWritesOwn(cmd(input), workspace);
+  for (const asked of [target(input), ...declaredValues(input, files)]) {
+    const why = asked ? writesLoadedFile(asked, workspace) : undefined;
+    if (why) return why;
+  }
+  return undefined;
+}
+
+/**
+ * Why a tool that writes to `asked` would write to what is loaded as the agent's own (see writesInstructions), or
+ * undefined: held in the folder of this conversation and every agent's home, as written and as they really are.
+ */
+const writesLoadedFile = (asked: string, workspace: string | undefined): string | undefined => writesLoadedFiles([asked], workspace);
+
+/** writesLoadedFile for each of several places, looked at together: the links into what is loaded are walked once. */
+function writesLoadedFiles(asked: string[], workspace: string | undefined): string | undefined {
+  if (!asked.length) return undefined;
+  if (workspace === undefined) return writesInstructions(asked.map((one) => path.resolve(one)));
+  const typed = asked.flatMap((one) => {
+    const place = askedPath(one, workspace);
+    return place === undefined ? [] : [place, realPathAhead(place)];
+  });
+  if (!typed.length) return undefined;
+  const homes = [workspace, ...listAgents().map((agent) => agent.home)].flatMap((home) => [path.resolve(home), realPath(home) ?? path.resolve(home)]);
+  return writesInstructions(typed, homes);
 }
 
 /**
@@ -837,15 +1701,22 @@ function callOf(toolName: string, action: string): Record<string, unknown> {
 export function approvalCannotHelp(toolName: string, action: string, workspace: string | undefined, portalSessionId?: string, files?: readonly string[]): string | undefined {
   // A read is never asked for: where it is allowed it needs no approval, and an approval does not open the rest.
   if (PATH_READERS.has(toolName)) return "it is a read, which needs no approval where it is allowed and is held to the folder of this conversation where it is not";
-  // A tool that declares its files is asked for them, a line each: an approval of them is what lets it run.
-  if (files) return undefined;
+  // A tool that declares its files is asked for them, a line each: an approval of them is what lets it run, but for
+  // a file that is kept from everybody who is not the primary user.
+  if (files) {
+    for (const file of rulePatterns(action, true)) {
+      const never = unrunnable(toolName, { path: file }, workspace);
+      if (never) return never;
+    }
+    return undefined;
+  }
   const input = callOf(toolName, action);
   const reached = viaMcp(toolName, input);
   const never = unrunnable(toolName, input, workspace) ?? (reached ? unrunnable(reached.toolName, reached.input, workspace) : undefined);
   if (never) return never;
   // A conversation that has read something untrusted refuses a push, an upload, a subagent or a schedule after
   // an approval as it did before it, and an approval spent on one would be gone.
-  const rule = portalSessionId ? taintRuleFor(portalSessionId, toolName, input) : undefined;
+  const rule = portalSessionId ? taintRuleFor(portalSessionId, toolName, input, { workspace }) : undefined;
   return rule ? `a result this conversation read looks like a prompt injection, and what it asks for is ${rule.why}` : undefined;
 }
 
@@ -928,8 +1799,8 @@ export function trustFlagged(portalSessionId: string, id: string): void {
  * The rule that would refuse this call in a conversation that has read something
  * untrusted, when it has and the rules are enforced there; otherwise undefined.
  */
-function taintRuleFor(portalSessionId: string, toolName: string, input: Record<string, unknown>): Rule | undefined {
-  return taints.get(portalSessionId)?.holds() ? taintRule(toolName, input) : undefined;
+function taintRuleFor(portalSessionId: string, toolName: string, input: Record<string, unknown>, context: RuleContext): Rule | undefined {
+  return taints.get(portalSessionId)?.holds() ? taintRule(toolName, input, context) : undefined;
 }
 
 /**
@@ -982,6 +1853,8 @@ export function guardExtension(
   gatewayNow: () => boolean = () => false,
   /** The files a tool declares it is approved for (see declaredFiles), read from its definition at each call. */
   filesOf: (toolName: string) => readonly string[] | undefined = () => undefined,
+  /** Whether the MCP adapter registered a tool of this name in this session: a server's tool, whatever it is called (see untrustedResult). */
+  fromAdapter: (toolName: string) => boolean = () => false,
 ) {
   return (pi: any): void => {
     // Per session, not global: a taint belongs to the conversation that read the
@@ -1041,7 +1914,7 @@ export function guardExtension(
       // What the calls this one made read is this one's to carry: a script that read a page and returned it hands the page on.
       const carried = typeof event.toolCallId === "string" ? readByCalls.get(event.toolCallId) : undefined;
       if (carried) readByCalls.delete(event.toolCallId);
-      const untrusted = untrustedResult(String(event.toolName ?? ""), event.input ?? {}) || carried !== undefined;
+      const untrusted = untrustedResult(String(event.toolName ?? ""), event.input ?? {}, fromAdapter(String(event.toolName ?? ""))) || carried !== undefined;
       if (!untrusted) return compact ? { content: formatted } : undefined;
 
       // Wrapped as data whatever it says; it taints the conversation only when it looks like it tries to instruct the agent.
@@ -1177,7 +2050,9 @@ export function guardExtension(
       }
       // The rule that refuses this call because the conversation has read something untrusted, if any.
       // It refuses whatever allows the call, so a one-off approval is not spent on it first: see below.
-      const heldByTaint = isTainted() && enforceTaint ? taintRule(event.toolName, event.input ?? {}) : undefined;
+      // The rule a conversation that has read something untrusted holds this call to, worked out once.
+      const ruleNow = isTainted() ? taintRule(event.toolName, event.input ?? {}, { workspace, files }) : undefined;
+      const heldByTaint = enforceTaint ? ruleNow : undefined;
       // A one-off approval, spent here. Checked last, after the standing rules,
       // because it is the expensive kind of permission: somebody was asked.
       const granted = () => {
@@ -1191,18 +2066,36 @@ export function guardExtension(
       // What may be read is not everything a role that can only read could ask
       // for: see unreadable. A heartbeat is the agent looking around for the
       // person it works for, with nobody else speaking, and reads what its
-      // WATCH.md names wherever that is. A rule or an approval opens a tool, not
-      // the secrets and private notes: checked before either is used, so that a
-      // one-off approval is not spent on a call that is refused after all.
-      if (role !== "primary" && role !== HEARTBEAT_ROLE) {
+      // WATCH.md names wherever that is, but for a place secrets are kept: it runs
+      // on its own, on what it reads, which can be anybody's words. A rule or an
+      // approval opens a tool, not the secrets and private notes, nor what would
+      // run with the primary user's rights: checked before either is used, so
+      // that a one-off approval is not spent on a call that is refused after all.
+      if (role !== "primary") {
+        const heartbeat = role === HEARTBEAT_ROLE;
         const reads = PATH_READERS.has(event.toolName);
         // What a server's tool is given through `mcp` is held to what is kept from this role as it is when it is called directly.
         const reached = viaMcp(event.toolName, event.input ?? {});
         const why = reads
-          ? unreadable(event.toolName, event.input ?? {}, workspace, alsoReadable)
+          ? heartbeat
+            ? searchesSecrets(event.toolName, event.input ?? {}, workspace)
+            : unreadable(event.toolName, event.input ?? {}, workspace, alsoReadable)
           : readOnly
             ? undefined
-            : unrunnable(event.toolName, event.input ?? {}, workspace) ?? (reached ? unrunnable(reached.toolName, reached.input, workspace) : undefined);
+            : (heartbeat ? keptFromAll : unrunnable)(event.toolName, event.input ?? {}, workspace, files) ??
+              (reached ? (heartbeat ? keptFromAll : unrunnable)(reached.toolName, reached.input, workspace) : undefined);
+        if (why && heartbeat) {
+          console.warn(`[guard ${sessionId}] blocked ${event.toolName}: heartbeat, ${why}`);
+          note("refused", `Not permitted for a heartbeat: ${why}`);
+          return {
+            block: true,
+            reason:
+              `Refused: ${why}. This is a heartbeat look, which runs on its own on what it reads, and what is ` +
+              `allowed for it does not reach secrets, what is loaded as your own instructions or tools, or what ` +
+              `would run with the primary user's rights. Leave a note saying what you could not do rather than ` +
+              `looking for another way to it.`,
+          };
+        }
         if (why) {
           console.warn(`[guard ${sessionId}] blocked ${event.toolName}: role ${role}, ${why}`);
           note("refused", `Not permitted for a ${role}: ${why}`);
@@ -1253,7 +2146,7 @@ export function guardExtension(
       }
 
       if (!isTainted()) return undefined;
-      const rule = heldByTaint ?? taintRule(event.toolName, event.input ?? {});
+      const rule = ruleNow;
       if (!rule) return undefined;
 
       // Recorded even when it does not block: "this ran with the guard off" is

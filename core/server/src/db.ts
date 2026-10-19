@@ -3,6 +3,7 @@ import { inTurnWithSettings, piSetting, readPiSettings, readProjectPiSettings } 
 import { packageIndex, packageKey, packageLabel, toolAvailability } from "./extension-switch.js";
 import { EDIT_IMAGE_SOURCE, EDIT_IMAGE_TOOL, GENERATE_IMAGE_SOURCE, GENERATE_IMAGE_TOOL, SHOW_IMAGE_SOURCE, imageEditingReady, imageGenerationReady } from "./image-generation.js";
 import { GENERATE_VIDEO_SOURCE, GENERATE_VIDEO_TOOL, SHOW_VIDEO_SOURCE, SHOW_VIDEO_TOOL, videoGenerationReady } from "./video-generation.js";
+import { UNDERSTORY } from "./features.js";
 import { BUILT_IN_SET, MEDIA_SET, PI_BUILT_IN_TOOLS, PORTAL_BROWSER_TOOLS, browserTool, defaultsFor, lazyToolEntry, mcpServerOf, toolEnabled, toolSetOf } from "./tool-policy.js";
 import { projectOf } from "./workspaces.js";
 import { browserServers, dropMcpCache, mcpAdapter, mcpCachePath, mcpConfigPath, mcpServerNames, onMcpWritten, readMcpCache, readMcpFile, readableMcpConfig, serversAndBrowsers } from "./api/mcp.js";
@@ -756,10 +757,10 @@ function migrate(d: Database.Database): void {
   if (ruleCols.length && !ruleCols.includes("person_key")) {
     d.exec("ALTER TABLE tool_rules ADD COLUMN person_key TEXT");
   }
-  // A rule for a tool that runs as the primary user never applies now, and the API refuses to make one. Those an older
-  // version made would stay listed as working: dropped, but for a heartbeat's own.
+  // A rule for a tool that runs as the primary user never applies now, a heartbeat's included, and the API refuses to
+  // make one. Those an older version made would stay listed as working: dropped.
   const asPrimary = Object.keys(RUNS_AS_PRIMARY);
-  d.prepare(`DELETE FROM tool_rules WHERE role != 'heartbeat' AND tool IN (${asPrimary.map(() => "?").join(", ")})`).run(...asPrimary);
+  d.prepare(`DELETE FROM tool_rules WHERE tool IN (${asPrimary.map(() => "?").join(", ")})`).run(...asPrimary);
   const questionCols = (d.prepare("PRAGMA table_info(questions)").all() as { name: string }[]).map(
     (c) => c.name
   );
@@ -2892,7 +2893,7 @@ const ADAPTER_LABEL = "pi-mcp-adapter";
 const noServerOf = (name: string): boolean => (PORTAL_BROWSER_TOOLS as readonly string[]).includes(name) || name === "mcp" || name === "mcp_script" || name === "mcpScript";
 
 /** Does the MCP adapter register this tool? By its package where it is recorded, by the label it is filed under where it is not. */
-function adapterTool(t: Pick<KnownTool, "source" | "package">): boolean {
+export function adapterTool(t: Pick<KnownTool, "source" | "package">): boolean {
   return typeof t.package === "string" ? packageLabel(t.package) === ADAPTER_LABEL : t.source === ADAPTER_LABEL;
 }
 
@@ -3151,6 +3152,27 @@ export function browserAllowlist(): string[] {
 
 export function setBrowserAllowlist(domains: string): void {
   putSetting("browser_allowlist", domains.trim());
+}
+
+/**
+ * The MCP servers whose tools' output the person counts as their own and not outside content, by the names they are
+ * configured under: the guard neither wraps nor scans it (see untrustedResult in pi/guard.ts). Every other server's is
+ * somebody else's words, and so is the browser's, trusted or not. Read at each result, so a change holds at once.
+ */
+export function trustedMcpServers(): Set<string> {
+  // Until the person says otherwise, the portal's own memory server, whose words are the agent's own notes.
+  const set = getSetting("guard_trusted_mcp_servers");
+  if (set === undefined) return new Set([UNDERSTORY]);
+  try {
+    const names = JSON.parse(set);
+    return new Set(Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function setTrustedMcpServers(names: readonly string[]): void {
+  putSetting("guard_trusted_mcp_servers", JSON.stringify([...new Set(names.map((name) => name.trim()).filter(Boolean))]));
 }
 
 /**
