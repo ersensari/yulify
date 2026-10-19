@@ -964,6 +964,153 @@ test('every folder on the way is held, not only the first: a deep one swapped fo
   }
 });
 
+/** swappedAt, for a call that is awaited: the hooks stay until it has settled. */
+async function swappedWhile(point, swap, fn) {
+  const real = {};
+  let swapped = false;
+  for (const name of point.names) {
+    real[name] = fs[name];
+    fs[name] = (...args) => {
+      if (!swapped && point.when(name, args)) {
+        swapped = true;
+        swap();
+      }
+      return real[name](...args);
+    };
+  }
+  syncBuiltinESMExports();
+  try {
+    await fn();
+  } finally {
+    for (const name of point.names) fs[name] = real[name];
+    syncBuiltinESMExports();
+  }
+  return swapped;
+}
+
+test('a folder on the way swapped for a link while git is asked about a delete: the delete is refused, and nothing where the link leads goes', async () => {
+  const { sub, aside, outside, base, swap, done } = swappable();
+  mkdirSync(path.join(sub, 'victim'));
+  writeFileSync(path.join(sub, 'victim', 'kept.txt'), 'ours');
+  mkdirSync(path.join(outside, 'victim'));
+  writeFileSync(path.join(outside, 'victim', 'precious.txt'), 'theirs');
+  // The agent moves while git is asked whether the folder holds work: removeEntry awaits that before it removes anything.
+  const removing = codeOf(() => removeEntry(base, 'sub/victim'));
+  swap();
+  assert.equal(await removing, 'invalid');
+  assert.equal(readFileSync(path.join(outside, 'victim', 'precious.txt'), 'utf8'), 'theirs', 'what the link leads to stays');
+  assert.equal(readFileSync(path.join(aside, 'victim', 'kept.txt'), 'utf8'), 'ours', 'and the folder that went aside is as it was');
+  done();
+});
+
+test('a delete goes on in the folder that was checked once it is held: the folder a link put in its place leads to stays', { skip: process.platform !== 'linux' && 'a folder is held by its path where descriptors cannot be named' }, async () => {
+  const { sub, aside, outside, base, swap, done } = swappable();
+  mkdirSync(path.join(sub, 'victim', 'deeper'), { recursive: true });
+  writeFileSync(path.join(sub, 'victim', 'deeper', 'a.txt'), 'ours');
+  mkdirSync(path.join(outside, 'victim'));
+  writeFileSync(path.join(outside, 'victim', 'precious.txt'), 'theirs');
+  assert.ok(await swappedWhile(reaching('/victim'), swap, () => removeEntry(base, 'sub/victim', true)));
+  assert.equal(readFileSync(path.join(outside, 'victim', 'precious.txt'), 'utf8'), 'theirs');
+  assert.deepEqual(names(aside), ['doc.md'], 'the one that was checked is the one that went');
+  done();
+});
+
+test('a folder in what is deleted swapped for a link as it is reached: the link goes, and what it leads to stays', async () => {
+  const { dir, base, outside, done } = setup();
+  const inner = path.join(dir, 'tree', 'inner');
+  mkdirSync(inner, { recursive: true });
+  writeFileSync(path.join(inner, 'a.txt'), 'ours');
+  writeFileSync(path.join(outside, 'a.txt'), 'theirs');
+  const swapInner = () => {
+    renameSync(inner, path.join(dir, 'inner.aside'));
+    symlinkSync(outside, inner);
+  };
+  assert.ok(await swappedWhile(reaching('/inner'), swapInner, () => removeEntry(base, 'tree', true)));
+  assert.ok(!existsSync(path.join(dir, 'tree')), 'the folder went, with the link in it');
+  assert.deepEqual(names(outside), ['a.txt', 'secret']);
+  assert.equal(readFileSync(path.join(outside, 'a.txt'), 'utf8'), 'theirs');
+  assert.equal(readFileSync(path.join(dir, 'inner.aside', 'a.txt'), 'utf8'), 'ours', 'what was moved out of it is not reached');
+  done();
+});
+
+test('a delete takes what fs.rm took: a name that is not UTF-8, an empty folder the portal may not read, and a folder that went while it was deleted', { skip: process.platform === 'darwin' && 'APFS takes no name that is not UTF-8' }, async () => {
+  const { dir, base, done } = setup();
+  const tree = path.join(dir, 'tree');
+  mkdirSync(path.join(tree, 'a'), { recursive: true });
+  mkdirSync(path.join(tree, 'b'));
+  writeFileSync(path.join(tree, 'a', 'one.txt'), 'x');
+  writeFileSync(path.join(tree, 'b', 'two.txt'), 'x');
+  // "café" in Latin-1, as a zip made on Windows leaves it: bytes that are not UTF-8.
+  writeFileSync(Buffer.concat([Buffer.from(`${tree}/`), Buffer.from([0x63, 0x61, 0x66, 0xe9])]), 'x');
+  mkdirSync(path.join(tree, 'locked'));
+  chmodSync(path.join(tree, 'locked'), 0o000);
+  // A folder that is taken away by someone else after it is opened and before it is listed: the second listing, of a or b.
+  const real = fs.promises.readdir;
+  let listings = 0;
+  fs.promises.readdir = async (where, options) => {
+    if (++listings === 2) rmSync(realpathSync(where), { recursive: true });
+    return real(where, options);
+  };
+  syncBuiltinESMExports();
+  try {
+    await removeEntry(base, 'tree', true);
+  } finally {
+    fs.promises.readdir = real;
+    syncBuiltinESMExports();
+  }
+  assert.ok(listings >= 2, 'a folder went while it was deleted');
+  assert.ok(!existsSync(tree), 'and all of it went');
+  done();
+});
+
+test('a listing that fails for a name in the folder, with the folder still there, is a conflict: the delete never says it is done when it is not', async () => {
+  const { dir, base, done } = setup();
+  mkdirSync(path.join(dir, 'tree'));
+  writeFileSync(path.join(dir, 'tree', 'a.txt'), 'x');
+  // As Node fails a listing on a file system that does not say what each name is, when a name goes before it is looked at.
+  const real = fs.promises.readdir;
+  fs.promises.readdir = async () => { throw Object.assign(new Error('a name went'), { code: 'ENOENT' }); };
+  syncBuiltinESMExports();
+  let got;
+  try {
+    got = await codeOf(() => removeEntry(base, 'tree', true));
+  } finally {
+    fs.promises.readdir = real;
+    syncBuiltinESMExports();
+  }
+  assert.equal(got, 'conflict');
+  assert.deepEqual(names(path.join(dir, 'tree')), ['a.txt']);
+  done();
+});
+
+test('a folder deeper than a delete goes is refused, and what the portal held on the way is let go', { skip: process.platform !== 'linux' && 'where a folder is held by its path, the length of the path stops it first' }, async () => {
+  const { dir, base, top } = setup();
+  // Made a folder at a time from the one before, as an agent can: no path is long enough to name the deepest.
+  execFileSync(process.execPath, ['-e', `const fs = require('fs'); process.chdir(${JSON.stringify(dir)}); fs.mkdirSync('deep'); process.chdir('deep'); for (let i = 0; i < 2100; i++) { fs.mkdirSync('d'); process.chdir('d'); } fs.writeFileSync('f', 'x');`]);
+  try {
+    assert.equal(await codeOf(() => removeEntry(base, 'deep', true)), 'failed');
+    assert.ok(existsSync(path.join(dir, 'deep')), 'what is too deep is left');
+    assert.match(await removeEntry(base, 'deep', true).catch((e) => e.message), /more than 2048 folders deep, and what is deeper is not deleted/);
+  } finally {
+    execFileSync('rm', ['-rf', top]);
+  }
+});
+
+test('a rename is done in the folder that was checked: refused when a link took its place before it is held, and in the folder that is held after', () => {
+  // Once it is held, only where a folder is held by its descriptor: elsewhere by its path.
+  const points = [[FIRST, 'invalid'], ...(process.platform === 'linux' ? [[{ names: ['renameSync'], when: () => true }, 'none']] : [])];
+  for (const [point, outcome] of points) {
+    const { aside, outside, base, swap, done } = swappable();
+    let got;
+    assert.ok(swappedAt(point, swap, () => { got = code(() => renameEntry(base, 'sub/doc.md', 'doc.old')); }));
+    assert.equal(got, outcome);
+    assert.deepEqual(names(outside), ['doc.md', 'secret'], 'nothing was renamed where the link leads');
+    assert.equal(readFileSync(path.join(outside, 'doc.md'), 'utf8'), 'theirs');
+    assert.deepEqual(names(aside), outcome === 'none' ? ['doc.old'] : ['doc.md']);
+    done();
+  }
+});
+
 test('a link to a folder inside the chat\'s folder is still written through: the path is checked, and the folder held is the one it leads to', () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'real'));
