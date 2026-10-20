@@ -12,7 +12,6 @@ import {
   LuHammer,
   LuShield,
   LuShieldCheck,
-  LuImages,
   LuInfo,
   LuKeyRound,
   LuKeyboard,
@@ -46,7 +45,6 @@ import { useNotifyState } from "../notify";
 import { setCommandTrigger, typedCharacter, useCommandTrigger, validTrigger } from "../command-trigger";
 import { DEFAULT_TRIGGER } from "../slash-palette";
 import { PeoplePanel } from "./PeoplePanel";
-import { MediaPanel } from "./MediaPanel";
 import { PortalExtensions } from "./PortalExtensions";
 import { RestartSection } from "./RestartSection";
 import { UpdateSection } from "./UpdateSection";
@@ -72,7 +70,7 @@ import { effortLabel } from "../effort";
 import { modelTraits } from "../model-traits";
 import { languageChoice, languages, msg, setLanguage, t, tp, tx, useLanguage, type LanguageChoice } from "../i18n";
 import { ErrorBoundary, PartFailed } from "./ErrorBoundary";
-import { useSlot } from "../extensions/slots";
+import { useSlot, type Registered } from "../extensions/slots";
 import { translate } from "../extensions/strings";
 import { SkeletonGroup } from "./Skeleton";
 import { useFlash } from "../use-flash";
@@ -86,8 +84,11 @@ import { useFlash } from "../use-flash";
  */
 const OWN_LAYOUT = new Set<Tab>(["extensions", "logs", "advanced"]);
 
-/** Either a fixed tab or one extension's own configuration page. */
-type Nav = { kind: "tab"; id: Tab } | { kind: "ext"; spec: string };
+/**
+ * Either a fixed tab or one extension's own configuration page: by its package's spec, which tells two installs of
+ * one package apart, or by its name, as its address names it (/settings/x/<name>).
+ */
+type Nav = { kind: "tab"; id: Tab } | { kind: "ext"; spec: string } | { kind: "ext"; name: string };
 
 type TabDef = { id: Tab; label: string; icon: ReactNode; hint: string };
 
@@ -110,7 +111,6 @@ const GROUPS: { label: string; tabs: TabDef[] }[] = [
       { id: "tools", label: msg("Tools"), icon: <LuHammer />, hint: msg("What the agent may reach for, by default") },
       { id: "sandbox", label: msg("Sandbox"), icon: <LuShieldCheck />, hint: msg("What the agent may read, change and run") },
       { id: "guard", label: msg("Guard"), icon: <LuShield />, hint: msg("What the agent is held to after it reads something untrusted") },
-      { id: "media", label: msg("Media"), icon: <LuImages />, hint: msg("The image and video models behind making pictures and videos") },
       { id: "skills", label: msg("Skills"), icon: <LuWrench />, hint: msg("Procedures the agent can reach for") },
       { id: "mcp", label: msg("MCP"), icon: <LuPlug />, hint: msg("Servers the agent can pull tools from") },
       { id: "extensions", label: msg("Extensions"), icon: <LuBlocks />, hint: msg("Install and manage packages") },
@@ -149,17 +149,33 @@ function railSnapshot(): { spec: string; name: string }[] {
   }
 }
 
+/**
+ * An extension's page as Settings' rail lists it: the title and the icon its own page gives (`settings.page`), in
+ * place of its package's name and the mark every extension has.
+ */
+function railEntry(name: string, pages: readonly Registered<"settings.page">[]): { label: string; icon: ReactNode } {
+  const page = pages.find((p) => p.extension === name);
+  return {
+    label: page?.title ? translate(name, page.title) : name,
+    // An extension's icon is a bare <svg>, sized as the portal's own icons size themselves: by the text beside them.
+    icon: page?.icon ? <span className="contents [&>svg]:h-[1em] [&>svg]:w-[1em]"><page.icon /></span> : <LuPuzzle />,
+  };
+}
+
 export const ConfigModal = memo(function ConfigModal({
   onClose,
   initialTab = "general",
+  extension,
   onSetup,
 }: {
   onClose: () => void;
   initialTab?: Tab;
+  /** An extension's page to open on in place of a tab, by its package's name. */
+  extension?: string;
   /** Opens the setup assistant in its place. */
   onSetup?: () => void;
 }) {
-  const [nav, setNav] = useState<Nav>({ kind: "tab", id: TABS.some((t) => t.id === initialTab) ? initialTab : "general" });
+  const [nav, setNav] = useState<Nav>(extension ? { kind: "ext", name: extension } : { kind: "tab", id: TABS.some((t) => t.id === initialTab) ? initialTab : "general" });
   const [error, setError] = useState<string | null>(null);
   const banner = useRef<HTMLDivElement>(null);
   /** A section a search went to, to scroll to once its page has drawn it. */
@@ -181,8 +197,6 @@ export const ConfigModal = memo(function ConfigModal({
   useEffect(() => {
     if (error) banner.current?.scrollIntoView({ block: "nearest" });
   }, [error]);
-  const section = nav.kind === "tab" ? nav.id : nav.spec;
-  useEffect(() => setError(null), [section]);
 
   // A package has a page here when the portal found settings it reads, or when it brought a page of its own.
   const settingsPages = useSlot("settings.page");
@@ -193,8 +207,14 @@ export const ConfigModal = memo(function ConfigModal({
     // Only a head start for next time.
     local.set(RAIL_KEY, JSON.stringify(configurable.map((e) => ({ spec: e.spec, name: e.name }))));
   }, [exts.value]);
+  // Opened at its address, the page is that of the first package of the name.
   const activeExt =
-    nav.kind === "ext" ? extensions.find((e) => e.spec === nav.spec) : undefined;
+    nav.kind === "ext" ? extensions.find((e) => ("spec" in nav ? e.spec === nav.spec : e.name === nav.name)) : undefined;
+  // Its entry in the rail: while the list is still asked for, one of the entries drawn from last time's, by the name.
+  const railSpec = nav.kind !== "ext" ? undefined : "spec" in nav ? nav.spec : (activeExt ?? configurable.find((e) => e.name === nav.name))?.spec;
+  // By the spec once it is known: a page opened at its address and then chosen in the rail is not drawn anew.
+  const section = nav.kind === "tab" ? nav.id : activeExt?.spec ?? ("spec" in nav ? nav.spec : nav.name);
+  useEffect(() => setError(null), [section]);
   // The extension pages rise in when they arrive late; drawn from what was
   // kept, they are simply there. Once in, a refresh does not replay it.
   // Not over names already drawn from the snapshot: they would rise a second time.
@@ -220,21 +240,24 @@ export const ConfigModal = memo(function ConfigModal({
       words: `${e.words ?? ""} ${e.title} ${e.section ?? ""}`,
       where: label(e.tab),
     }));
-    const own = extensions.flatMap((x) => [
-      { tab: "extensions", ext: x.spec, title: x.name, words: `${x.description ?? ""} extension settings`, where: t("Extension settings") },
-      ...x.settings.map((st) => ({ tab: "extensions", ext: x.spec, section: t("Settings"), title: humanKey(st.key), words: `${st.key} ${x.name}`, where: x.name })),
-      // What the extension's own page says is on it, in the words the page shows, and in English too.
-      ...settingsPages.filter((page) => page.extension === x.name).flatMap((page) =>
-        (page.search ?? []).map((found) => ({
-          tab: "extensions",
-          ext: x.spec,
-          title: translate(x.name, found.title),
-          ...(found.section ? { section: translate(x.name, found.section) } : {}),
-          words: `${found.words ?? ""} ${found.title} ${found.section ?? ""}`,
-          where: x.name,
-        })),
-      ),
-    ]);
+    const own = extensions.flatMap((x) => {
+      const { label } = railEntry(x.name, settingsPages);
+      return [
+        { tab: "extensions", ext: x.spec, title: label, words: `${x.name} ${x.description ?? ""} extension settings`, where: t("Extension settings") },
+        ...x.settings.map((st) => ({ tab: "extensions", ext: x.spec, section: t("Settings"), title: humanKey(st.key), words: `${st.key} ${x.name}`, where: label })),
+        // What the extension's own page says is on it, in the words the page shows, and in English too.
+        ...settingsPages.filter((page) => page.extension === x.name).flatMap((page) =>
+          (page.search ?? []).map((found) => ({
+            tab: "extensions",
+            ext: x.spec,
+            title: translate(x.name, found.title),
+            ...(found.section ? { section: translate(x.name, found.section) } : {}),
+            words: `${found.words ?? ""} ${found.title} ${found.section ?? ""}`,
+            where: label,
+          })),
+        ),
+      ];
+    });
     return [...fixed, ...own];
   }, [extensions, settingsPages, lang]);
 
@@ -272,8 +295,8 @@ export const ConfigModal = memo(function ConfigModal({
       title={t("Settings")}
       subtitle={t("Applies to the whole portal")}
       onClose={onClose}
-      startInRail={initialTab === "general"}
-      section={nav.kind === "tab" ? t(TABS.find((x) => x.id === nav.id)?.label ?? "") : activeExt?.name}
+      startInRail={!extension && initialTab === "general"}
+      section={nav.kind === "tab" ? t(TABS.find((x) => x.id === nav.id)?.label ?? "") : activeExt && railEntry(activeExt.name, settingsPages).label}
       rail={
         <SettingsSearch index={index} onPick={go}>
         <div className="space-y-4">
@@ -298,9 +321,8 @@ export const ConfigModal = memo(function ConfigModal({
               {configurable.map((e) => (
                 <RailItem
                   key={e.spec}
-                  icon={<LuPuzzle />}
-                  label={e.name}
-                  active={nav.kind === "ext" && nav.spec === e.spec}
+                  {...railEntry(e.name, settingsPages)}
+                  active={railSpec === e.spec}
                   onClick={() => setNav({ kind: "ext", spec: e.spec })}
                 />
               ))}
@@ -325,7 +347,6 @@ export const ConfigModal = memo(function ConfigModal({
       {nav.kind === "tab" && nav.id === "tools" && <ToolDefaults onError={setError} />}
       {nav.kind === "tab" && nav.id === "sandbox" && <SandboxSettings onError={setError} />}
       {nav.kind === "tab" && nav.id === "guard" && <GuardSettings onError={setError} onOpen={(id) => setNav({ kind: "tab", id })} />}
-      {nav.kind === "tab" && nav.id === "media" && <MediaPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "skills" && <SkillsPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "mcp" && <McpPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "extensions" && (

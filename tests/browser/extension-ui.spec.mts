@@ -603,3 +603,259 @@ test.describe('a page that says whether it is listed', () => {
     await expect(page.getByText("The viewer's page")).toBeVisible();
   });
 });
+
+// A gallery of pictures with a page in Settings: the portal's tests' stand-in for one.
+test.describe('an extension with a page of pictures and a page in Settings', () => {
+  test.use({ installed: ['tests/fixtures/extensions/album'] });
+
+  /** The album as Settings lists what is installed. */
+  const ALBUM = { spec: 'tests/fixtures/extensions/album', name: 'test-album', version: '0.1.0', settings: [] };
+
+  /** The portal, with the album installed as Settings lists it (or what `installed` says), and a chat to open Settings over. */
+  async function album(page: Page, installed: object[] = [ALBUM]) {
+    const at = new Date().toISOString();
+    const chat = { id: 'a', title: 'First chat', workspace: '/w/site', status: 'idle', kind: 'task', pinned: false, updated_at: at, provider: null, model: null, thinking_level: null };
+    const model = { id: 'model-a', name: 'Model A', provider: 'llama-swap' };
+    await mockPortal(page, ({ path: p }) => {
+      if (p === '/api/extensions') return { settingsPath: '/a/settings.json', extensions: installed };
+      if (p === '/api/sessions') return { sessions: [chat], executor: 'host' };
+      if (p === '/api/sessions/a') return chat;
+      if (/^\/api\/sessions\/a\/(config|models)$/.test(p)) return { live: false, state: { model, thinkingLevel: 'medium' }, stats: null, thinking: { levels: ['off', 'medium'] }, models: { models: [model] }, named: { provider: null, model: null } };
+    }, { settings: true });
+  }
+
+  test('its page keeps what it shows in its address, in place, and is drawn again as the address changes, by Back and Forward too', async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album');
+    const address = page.getByTestId('album-address');
+    await expect(address).toHaveText('/x/test-album/album');
+    const before = await page.evaluate(() => history.length);
+    await page.getByRole('button', { name: 'Marked' }).click();
+    await expect(page).toHaveURL(/\/x\/test-album\/album\?show=marked$/);
+    await expect(address).toHaveText('/x/test-album/album?show=marked');
+    await expect(page.getByRole('button', { name: 'Marked' })).toHaveAttribute('aria-pressed', 'true');
+    // In place of the address it had: Back does not go to it.
+    expect(await page.evaluate(() => history.length)).toBe(before);
+    // Its entry in the sidebar is the page without the choice: the page, still drawn, follows.
+    await sidebar(page).getByRole('button', { name: 'Album' }).click();
+    await expect(address).toHaveText('/x/test-album/album');
+    await expect(page.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+    await page.goBack();
+    await expect(address).toHaveText('/x/test-album/album?show=marked');
+    await page.goForward();
+    await expect(address).toHaveText('/x/test-album/album');
+  });
+
+  test('its page reads its own address from the first time it is drawn, opened from another page or by Back', async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album?show=marked');
+    const first = page.getByTestId('album-first-address');
+    await expect(first).toHaveText('/x/test-album/album?show=marked');
+    await sidebar(page).getByRole('button', { name: 'Sessions' }).click();
+    await expect(first).toHaveCount(0);
+    await page.goBack();
+    await expect(first).toHaveText('/x/test-album/album?show=marked');
+    await sidebar(page).getByRole('button', { name: 'Sessions' }).click();
+    await expect(first).toHaveCount(0);
+    await sidebar(page).getByRole('button', { name: 'Album' }).click();
+    await expect(first).toHaveText('/x/test-album/album');
+  });
+
+  test('its page keeps its own address while the next page is fetched, drawn again meanwhile and going from there', async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album');
+    const address = page.getByTestId('album-address');
+    await expect(address).toHaveText('/x/test-album/album');
+    // The Sessions page is fetched when it is first gone to; until it is there, the album stays on screen.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let asked!: () => void;
+    const fetching = new Promise<void>((resolve) => (asked = resolve));
+    await page.route(/\/components\/SessionsPage\.tsx/, async (route) => {
+      asked();
+      await held;
+      await route.continue();
+    });
+    await sidebar(page).getByRole('button', { name: 'Sessions' }).click();
+    await fetching;
+    await page.getByRole('button', { name: 'Start the slideshow' }).click();
+    await page.getByRole('button', { name: 'Close the slideshow' }).click();
+    await expect(address).toHaveText('/x/test-album/album');
+    await page.getByRole('button', { name: 'Marked' }).click();
+    await expect(page).toHaveURL(/\/x\/test-album\/album\?show=marked$/);
+    release();
+  });
+
+  test("a part of its own over the page goes as the portal's dialogs do, as a picture of itself that its stylesheet still reaches", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('animations', 'on'));
+    await album(page);
+    await page.goto('/x/test-album/album');
+    await page.getByRole('button', { name: 'Start the slideshow' }).click();
+    const show = page.getByRole('dialog', { name: 'Slideshow' });
+    await expect(show).toBeVisible();
+    // Nobody has seen it in less than this, and then nothing is made to leave (motion.ts).
+    await page.waitForTimeout(250);
+    await show.getByRole('button', { name: 'Close the slideshow' }).click();
+    await expect(show).toHaveCount(0);
+    await expect(page.locator('[data-ghost][data-extension="test-album"]')).toHaveCount(1);
+  });
+
+  test("its pictures open in the portal's viewer, with a button of its own beside the viewer's, and the one shown last has the focus back", async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album');
+    await page.getByRole('button', { name: 'Dunes at noon' }).click();
+    const viewer = page.getByRole('dialog', { name: 'Picture viewer' });
+    await expect(viewer).toContainText('Dunes at noon');
+    const mark = viewer.getByRole('button', { name: 'Mark Dunes at noon' });
+    // The look of the viewer's own buttons, and the extension's own part, out over the page as the viewer is.
+    expect(await mark.getAttribute('class')).toBe(await viewer.getByRole('button', { name: 'Close' }).evaluate((close) => `${close.className} aria-pressed:bg-accent/15 aria-pressed:text-accent`));
+    expect(await mark.evaluate((button) => button.closest('[data-extension]')?.getAttribute('data-extension'))).toBe('test-album');
+    await mark.click();
+    await expect(mark).toHaveAttribute('aria-pressed', 'true');
+    // Stepped on to the next and closed: the preview of that one, which the page marked with its own id, has the focus.
+    await page.keyboard.press('ArrowRight');
+    await expect(viewer).toContainText('A harbour at dusk');
+    await page.keyboard.press('Escape');
+    await expect(viewer).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'A harbour at dusk' })).toBeFocused();
+  });
+
+  test("its dialog is the portal's: it asks before a name typed in it is lost, and closes from its own button", async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album');
+    await page.getByRole('button', { name: 'Rename the album' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Rename the album' });
+    await expect(dialog).toContainText('As the sidebar lists it');
+    // Only opened, it closes at once.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole('button', { name: 'Rename the album' }).click();
+    await dialog.getByRole('textbox', { name: 'Album name' }).fill('Summer');
+    await page.keyboard.press('Escape');
+    const ask = page.getByRole('alertdialog', { name: 'Discard your changes?' });
+    await ask.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog.getByRole('textbox', { name: 'Album name' })).toHaveValue('Summer');
+    await dialog.getByRole('button', { name: 'Done' }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("its page in Settings is listed by the title and the mark it gives, at an address of its own, over a chat too, and asks before what is typed in it is lost", async ({ page }) => {
+    await album(page);
+    await page.goto('/x/test-album/album');
+    await page.getByRole('button', { name: 'Album settings' }).click();
+    await expect(page).toHaveURL(/\/settings\/x\/test-album$/);
+    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    await expect(dialog.getByTestId('album-settings')).toBeVisible();
+    const entry = dialog.getByRole('navigation').getByRole('button', { name: 'Album', exact: true });
+    await expect(entry).toHaveAttribute('aria-current', 'page');
+    await expect(entry.getByTestId('album-icon')).toHaveCount(1);
+    await expect(dialog.getByRole('navigation').getByRole('button', { name: 'test-album' })).toHaveCount(0);
+
+    // Something typed in the page and not saved: closing Settings asks first.
+    await dialog.getByRole('textbox', { name: 'Album title' }).fill('Summer');
+    await page.keyboard.press('Escape');
+    const ask = page.getByRole('alertdialog', { name: 'Discard your changes?' });
+    await ask.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog.getByRole('textbox', { name: 'Album title' })).toHaveValue('Summer');
+    // Opened at its address, it is the page its entry in the rail opens: chosen there, it is not drawn anew.
+    await entry.click();
+    await expect(dialog.getByRole('textbox', { name: 'Album title' })).toHaveValue('Summer');
+
+    // Over a chat, by its address; and the address of an extension that is not installed says so.
+    await page.goto('/s/a/settings/x/test-album');
+    await expect(dialog.getByTestId('album-settings')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page).toHaveURL(/\/s\/a$/);
+    await page.goto('/settings/x/test-nothing');
+    await expect(dialog).toContainText('That extension is no longer installed.');
+  });
+
+  test('opened at its address, its entry in the rail is the one chosen while what is installed is still being asked for', async ({ page }) => {
+    await page.addInitScript((spec) => localStorage.setItem('pithagoras.settings.extension-rail', JSON.stringify([{ spec, name: 'test-album' }])), ALBUM.spec);
+    await album(page);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route('**/api/extensions', async (route) => {
+      await held;
+      await route.fallback();
+    });
+    await page.goto('/settings/x/test-album');
+    const entry = page.getByRole('dialog', { name: 'Settings' }).getByRole('navigation').getByRole('button', { name: 'Album', exact: true });
+    await expect(entry).toHaveAttribute('aria-current', 'page');
+    release();
+    await expect(entry).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('installed twice, each copy has its page in Settings: by the rail, by Configure in Extensions and by a search, and its address opens the first', async ({ page }) => {
+    const copy = { spec: 'npm:test-album', name: 'test-album', version: '0.2.0', settings: [{ key: 'albumShuffle', value: 'on', configured: true }] };
+    await album(page, [ALBUM, copy]);
+    await page.goto('/settings/x/test-album');
+    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    const entries = dialog.getByRole('navigation').getByRole('button', { name: 'Album', exact: true });
+    const shows = (spec: string) => expect(dialog.getByText(spec, { exact: true })).toBeVisible();
+    await expect(entries).toHaveCount(2);
+    await shows(ALBUM.spec);
+    await expect(entries.nth(0)).toHaveAttribute('aria-current', 'page');
+    await expect(entries.nth(1)).not.toHaveAttribute('aria-current');
+
+    await entries.nth(1).click();
+    await shows(copy.spec);
+    await expect(entries.nth(1)).toHaveAttribute('aria-current', 'page');
+    await expect(entries.nth(0)).not.toHaveAttribute('aria-current');
+    await entries.nth(0).click();
+    await shows(ALBUM.spec);
+
+    await dialog.getByRole('navigation').getByRole('button', { name: 'Extensions', exact: true }).click();
+    await dialog.getByRole('listitem').filter({ hasText: copy.spec }).getByRole('button', { name: /^Configure/ }).click();
+    await shows(copy.spec);
+    await expect(entries.nth(1)).toHaveAttribute('aria-current', 'page');
+
+    // A setting only the second reads.
+    await entries.nth(0).click();
+    await dialog.getByLabel('Search settings').fill('albumShuffle');
+    await dialog.getByRole('option', { name: /shuffle/i }).click();
+    await shows(copy.spec);
+  });
+
+  test("Settings' search finds what its page says is on it, under the page's title, and opens the group that folds where it is", async ({ page }) => {
+    await album(page);
+    await page.goto('/settings/general');
+    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    await dialog.getByLabel('Search settings').fill('front');
+    const hit = dialog.getByRole('option', { name: /Album cover/ });
+    await expect(hit).toContainText('Album › Cover');
+    await hit.click();
+    const cover = dialog.locator('details', { hasText: 'The picture in front.' });
+    await expect(cover).toHaveAttribute('open', '');
+    await expect(cover).toBeInViewport();
+  });
+});
+
+test.describe("a call of an extension's tool in voice mode", () => {
+  test.use({ installed: ['tests/fixtures/extensions/album'] });
+
+  test("its card says what the extension says of it, and has the extension's tile in the place of the mark, drawn as the extension's own part", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as any).EventSource = class { onmessage: any; onopen: any; addEventListener() {} close() {} };
+    });
+    await page.route('**/api/sessions/test/commands', (route) => route.fulfill({ json: { commands: [] } }));
+    await page.route('**/api/sessions/test/config', (route) => route.fulfill({ status: 503, json: {} }));
+    await page.route('**/api/sessions/test/picture?**', (route) => route.fulfill({ status: 404, json: {} }));
+    await page.route('**/api/voice', (route) => route.fulfill({ json: { enabled: true } }));
+    await page.route('**/api/browser', (route) => route.fulfill({ json: { install: { container: 'running' } } }));
+    await page.goto('/tests/voice.html');
+    await page.getByRole('button', { name: 'Turn on hands-free voice' }).click();
+    await expect(page.getByRole('status')).toHaveText('Listening', { timeout: 25000 });
+
+    await page.getByRole('button', { name: 'Start a chart' }).click();
+    // Its words, not the portal's for a tool it does not know.
+    const card = page.locator('.voice-tool-float', { hasText: 'Drawing a chart' });
+    await expect(card).toContainText('Sales by month');
+    const tile = card.getByTestId('album-tile');
+    await expect(tile).toHaveText('running number test');
+    await expect(card.locator(':scope > svg')).toHaveCount(0);
+    expect(await tile.evaluate((own) => own.closest('[data-extension]')?.getAttribute('data-extension'))).toBe('test-album');
+    await page.getByRole('button', { name: 'Finish the chart' }).click();
+    await expect(tile).toHaveText('done number test');
+  });
+});

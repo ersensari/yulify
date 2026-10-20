@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useSyncExternalStore } from "react";
+import { createContext, useContext, useSyncExternalStore } from "react";
 import * as ReactDOM from "react-dom";
 import * as jsxRuntime from "react/jsx-runtime";
 import { api, ApiError, EXTENSIONS_CHANGED, json, type ExtensionUi } from "../api";
@@ -55,10 +55,21 @@ let settled = false;
 const watchers = new Set<() => void>();
 const changed = () => { for (const watcher of [...watchers]) watcher(); };
 
-let go: (path: string) => void = () => {};
+let go: (path: string, options?: { replace?: boolean }) => void = () => {};
 /** How `portal.navigate` goes somewhere: the app's own router, once it is there. */
-export function setNavigate(navigate: (path: string) => void): void {
+export function setNavigate(navigate: (path: string, options?: { replace?: boolean }) => void): void {
   go = navigate;
+}
+
+/**
+ * The page's address as the app's router has it, which the app gives everything it draws: what `portal.useLocation`
+ * gives. Read from React, not from the browser's address bar: a part drawn first at a new address has that address
+ * from its first draw, and a page still on screen while the next one is fetched keeps its own until it goes.
+ */
+export const Here = createContext<{ path: string; search: string } | null>(null);
+/** The hook behind `portal.useLocation`. Where nothing gives it (a test page of an extension's, outside the app), the browser's address. */
+function useHere(): { path: string; search: string } {
+  return useContext(Here) ?? { path: window.location.pathname, search: window.location.search };
 }
 
 const quietly = (fn: () => void) => {
@@ -146,7 +157,8 @@ async function activate(ext: ExtensionUi, told: Promise<void>[]): Promise<void> 
       extension: ext.name,
       React,
       slots: { register: (slot, entry) => kept(register(ext.name, slot, entry)) },
-      navigate: (path) => go(path),
+      navigate: (path, options) => go(path, options),
+      useLocation: useHere,
       ui,
       api: {
         json,

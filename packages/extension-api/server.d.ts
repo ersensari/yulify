@@ -194,8 +194,35 @@ export interface ServerPortal {
     list(): AgentFolder[];
     /** Whether a folder, by its real path, is one the agents may work in: an agent's home, or one inside the workspace root. Only from one of these is what the agents made there to be served. */
     allowed(folder: string): boolean;
-    /** The portal deleted one: a project with its folder, or an agent with its home. `folder` is where it really was, as `list` named it. */
+    /**
+     * The portal deleted one: a project with its folder, or an agent with its home. `folder` is where it really was, as
+     * `list` named it. One deleted while this server half was not running (switched off, removed, or failing to start)
+     * it is told of once, when it next starts, as soon as its default export is done; of none deleted before the
+     * package first started.
+     */
     on(event: "removed", handler: (folder: string) => void): void;
+    /**
+     * What the person calls a folder, by its real path, whether or not `list` has it now: its agent's name for an
+     * agent's home (`home` for the first), its place under the workspace root for a folder inside it, its last part
+     * otherwise. For a folder something was kept for after the last chat in it went.
+     */
+    label(folder: string): { name: string; home?: true };
+  };
+  /**
+   * What an earlier version of the portal kept for something it did itself and an extension now does: when a
+   * feature of the portal's own becomes an extension's, the upgrade leaves what it had (its records, its settings,
+   * its files) in the portal's data folder under a name for what it was, for whichever extension takes it up, and
+   * nothing of it is lost while none does.
+   */
+  handoffs: {
+    /**
+     * The folder of what was left under `name`, moved into this package's own folder (`dataDir()`), and nothing when
+     * nothing was. The first that asks has it, whole. It stays there until `done`, so a start that stopped half way
+     * through reading it finds it again: read it so that reading it twice does no harm.
+     */
+    take(name: string): string | undefined;
+    /** Read: removes what `take` gave. */
+    done(name: string): void;
   };
   tools: {
     /**
@@ -452,7 +479,7 @@ export interface ServerPortal {
    * A folder of the package's own in the portal's data folder, made (closed to
    * everyone but the portal, 0700) when it is asked for: for what the portal
    * runs as itself on and an agent must not shape, such as a git repository
-   * or a database.
+   * or a database. Its real path, so it can be given to `files` as a `base`.
    */
   dataDir(): string;
 }
