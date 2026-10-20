@@ -769,11 +769,12 @@ restart the portal.
 | `chats.folder(id)` | The folder the chat's pi works in, on this disk |
 | `chats.inFolder(folder)` | The sessions of every kind that work in a folder: tasks, and also routine runs, Agent-page and channel conversations and heartbeats, which `chats.list()` leaves out and which have the package's tools in their pi. One for each agent that has some there (what an agent can reach is the same from each of its sessions; none is removed, and a stored path can be a link an agent made) |
 | `chats.send(chatId, data)`, `chats.onOpen(fn)` | [Telling the pages open on a chat](#telling-the-pages-open-on-a-chat) |
-| `chats.on("started" \| "stopped" \| "deleted", fn)` | A chat's pi started or stopped; the chat was deleted |
+| `chats.on("started" \| "stopped" \| "deleted" \| "finished", fn)` | A chat's pi started or stopped; the chat was deleted; or it is finished: the run it was started for is over, and the portal stopped its pi for good, as for a routine run in a session of its own. A person who goes on with the chat starts its pi again (`started`). A pi stopped for being idle is not finished: it starts again with the next message |
 | `chats.onEvent(fn)` | Everything a chat's pi says, as it says it |
 | `chats.tell(chatId, data)` | To the package's own pi extension in a chat (`pithagoras:v1:ui:receive`) |
 | `chats.extend(factory)` | [Tools that share this module's state](#tools-that-share-the-server-half-s-state) |
 | `tools.offer(fn)`, `chats.reload()` | [Tools that follow the settings](#tools-that-follow-the-settings): which of them it offers now, and the open chats given the change |
+| `tools.exceptions(names)` | [Who has its tools](#who-has-its-tools): the chats and routines where those tools are not what the default says |
 | `chats.offers(chatId, tool)` | How the chat's model is offered a tool now: `"direct"`, `"lazy"` (through the `tools` tool) or nothing (switched off, out of reach, or the chat's pi not running here) |
 | `chats.hold(chatId)` | Keeps the chat's pi from being let go for being idle, or reloaded, while work goes on; returns what lets it go |
 | `sandbox.run(chatId, argv, options?)`, `sandbox.spawnAs(chatId)`, `sandbox.on()` | [Running things as the chat's agent](#running-things-as-the-chat-s-agent) |
@@ -1273,19 +1274,69 @@ chat whose pi runs in the portal's own process (the host executor, where
 pi.registerTool({ name: "docker_run", /* … */ offByDefault: true });
 ```
 
-A tool that works on files the person approves (the pictures of Media's
-`edit_image`) says which of its parameters hold them, as `approvalFiles`: names
-of parameters it declares as text or a list of text (`edit_image` names `path`
-and `paths`, one picture or a list as its settings say). The guard then
-approves a call for each of those files and for nothing else of it: a rule for
-a folder allows the call when it allows every file, and the action asked for is
-each file's path, one to a line. Every other tool is approved on its command,
-its path or its arguments whole, whatever a call of it carries, and a command,
-a tool server's tools and the `tools` tool never are on files.
+#### What the guard holds a tool to
+
+A tool says what the [guard](/guide/security) is to hold it to in `guard` on
+its definition, read at each call, for a tool of `chats.extend` and of any
+package's pi extension alike, in a chat whose pi runs in the portal's own
+process. A tool that declares no `guard` is trusted as your extension is: what
+it returns is not marked as outside content, and of the rules after a suspected
+prompt injection only `read-credentials` holds it, as it holds every tool, where
+its `path` or `file_path` argument names a place secrets are kept. A name like a
+browser's holds a tool to the browser's rules, whether or not it declares
+anything (see below).
+
+- `outside: true`: what it returns is outside content, such as a page, a mail
+  or a file somebody else wrote. It comes to the model wrapped as data, between
+  markers with a random id the content cannot close, and a result that looks
+  like it tries to instruct the agent is flagged and holds the conversation to
+  the rules after a suspected prompt injection. The paragraph saying that such
+  content is data and never instructions is the portal's, said once in the
+  prompt while any tool that declares `outside` is on or lazy, so the tool does
+  not carry it.
+- `reaches`: the names of its parameters that hold an address the agent chose,
+  a URL or a host. Each value a call has in them, text or each text of a list,
+  is held to the list of sites in **Settings → Guard**, where an empty list is
+  any site. A call with an address off the list is refused, and recorded in
+  Audit as `refused`; each address a call goes to is recorded as `browsed`.
+  Only those parameters are read, from the call's own arguments.
+- `acts`: the rules after a suspected prompt injection that every call of it
+  is the shape of, by their names: `pipe-to-shell`, `write-to-path`, `upload`,
+  `read-credentials`, `publish`, `persist`, `delegate`. Once the conversation
+  has read a flagged result, a call is held as a command that rule catches: it
+  is refused, and no approval is asked for or spent on it, unless a routine is
+  exempt from the rule, which Audit records. Before that it runs. A name that is
+  no rule's is left out, and said in the portal's log.
+- `files`: the names of its parameters that hold the files a call works on,
+  each declared as text or a list of text (Media's `edit_image` names `path`
+  and `paths`, one picture or a list as its settings say). A call is approved
+  for each of those files and for nothing else of it: a rule for a folder
+  allows the call when it allows every file, and the action asked for is each
+  file's path, one to a line. Every other tool is approved on its command, its
+  path or its arguments whole, and a command, a tool server's tools and the
+  `tools` tool never are on files. `approvalFiles` beside `guard` is the older
+  spelling, and is still read.
 
 ```js
-pi.registerTool({ name: "merge_pdfs", parameters: { type: "object", properties: { inputs: { type: "array", items: { type: "string" } }, title: { type: "string" } } }, approvalFiles: ["inputs"], /* … */ });
+pi.registerTool({
+  name: "fetch_page",
+  parameters: { type: "object", properties: { url: { type: "string" }, save: { type: "array", items: { type: "string" } } } },
+  guard: { outside: true, reaches: ["url"], files: ["save"] },
+  /* … */
+});
+pi.registerTool({ name: "send_report", /* … */ guard: { acts: ["upload"] } });
 ```
+
+The declaration's type is `ToolGuard`, from `@pithagoras/extension-api/server`.
+An MCP server's tools declare nothing. What one returns is outside content
+unless its server is counted as your own in **Settings → Guard**. A tool named
+like a browser's (`browser` at the start or after `_` or `.`, and followed by
+`_` or `.`: `browser_navigate`, `playwright_browser_click`) is held to the
+browser's rules by its name, a server's or an extension's, declared or not:
+what it returns is outside content, and a call is held to the conversation's
+switches for the browser, the list of sites for its `url`, and Audit. The
+portal's own browser tools declare `outside` and `reaches: ["url"]`, and have
+such names too.
 
 #### Tools that follow the settings
 
@@ -1312,6 +1363,27 @@ Media's tools are built this way (`extensions/media/src/server/pi/tools.ts`):
 endpoint is set up, and `generate_video` and `show_video` while video
 generation is; a save of its settings that changes which there are, or the
 shape of `edit_image`, reloads the idle chats.
+
+#### Who has its tools
+
+A page that says who may use its tools asks the portal where they are not
+what the default says. `tools.exceptions(names)` answers for those tools, by
+name, as the switches have them now: `byDefault`, whether a chat that has
+never said anything about them has any of them on; `chats`, those that have
+them otherwise, by their own switches or by their agent's or project's, newest
+first, each `{ id, title, kind }` and each the opposite of `byDefault`; and
+`routines`, those whose own switches give their runs another answer than a
+routine that sets nothing would have in the same place, by name, each
+`{ slug, name, allowed }` with the answer its runs have. A routine that sets
+nothing has the browser's tools off until its **Browser** switch is on, and
+every other tool as a chat in its place has it. The switches
+themselves stay in Settings → Tools, beside each chat's composer and on each
+routine's page.
+
+```js
+portal.router.get("/who", (_req, res) => res.json(portal.tools.exceptions(["page_open", "page_read"])));
+// { byDefault: true, chats: [{ id: "a1", title: "Shopping", kind: "task" }], routines: [{ slug: "nightly", name: "Nightly", allowed: true }] }
+```
 
 ### Files a tool gives
 
@@ -1782,7 +1854,7 @@ the portal, and what gives the same to an extension:
 | Its tools' cards in voice mode saying what they do, and its tools telling a spoken turn to keep it short | `describe` on its `voice.window` or on its `chat.tool` entries; `voiceGuidelines` on its tools |
 | The picture a tool is making, small on its card in voice mode | `tile` on its `chat.tool`, drawing `ui.ImagePreview` with `compact` |
 | Tools that are there only while their endpoint is set up, listed in Settings → Tools before a chat has had them | `tools.offer`, and `chats.reload()` once a save changes them |
-| A tool whose pictures the person approves one by one | `approvalFiles` |
+| A tool whose pictures the person approves one by one; one that reads outside content, goes to an address, or sends things out | `guard` on the tool: `files` (`approvalFiles` in the older spelling), `outside`, `reaches`, `acts` |
 | A store of its own, a database and files the agents cannot reach, and native packages (better-sqlite3, sharp) | `dataDir()`, and the dependencies in its own `package.json` and lock |
 | What the portal kept of it before it was an extension | `portal.handoffs` |
 | Pictures and clips sent from its own folder, as the portal sends its own | `files.open(dataDir(), …)`, `http.send` |

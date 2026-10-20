@@ -240,6 +240,11 @@ the browser — a conversation with them all off is not offered them and does no
 reach the container. A routine has its own **Browser** switch on its own page,
 off by default.
 
+**Browser → Who may drive it** says what the default is, and lists the
+conversations that have it otherwise, each marked **on** or **off**, and the
+routines whose own switch or tools give their runs the browser, which a
+routine's runs do not have until it does, whatever the default is.
+
 With a Playwright MCP server added by hand instead, which server is the browser
 comes from where it connects, not from what it is called: the one whose
 `--cdp-endpoint` points at this browser. The same switches then apply to its
@@ -284,8 +289,11 @@ is what the old switch wrote.
 
 ## Where it may go
 
-**Browser → Where it may go** takes one domain per line, `*.example.com` for
-subdomains. Empty means no restriction.
+**Settings → Guard → Sites the agent's tools may reach** takes one domain per
+line, `*.example.com` for subdomains. An empty list means any site. It is one
+list for every tool that says where it goes (the portal's own browser tools say
+their `url` is) and for the browser tools an MCP server brings, such as a
+Playwright MCP server's. **Browser → Where it may go** says so, and links to it.
 
 ::: danger Read this one together with the section above
 That default was written when the browser was off until somebody turned it on,

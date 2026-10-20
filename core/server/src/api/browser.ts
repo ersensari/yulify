@@ -1,11 +1,9 @@
 import express, { type Router } from "express";
 import {
   agentTools,
-  browserAllowlist,
-  browserByDefault,
   browserConfigured,
   browserCursorOn,
-  browserExceptions,
+  browserPolicy,
   getDb,
   getSession,
   knownTools,
@@ -14,7 +12,6 @@ import {
   projectTools,
   routineTools,
   sessionTools,
-  setBrowserAllowlist,
   setBrowserCursor,
   setPortalBrowser,
   setAgentTools,
@@ -23,6 +20,7 @@ import {
   setSessionTools,
   setToolDefaultsOff,
   toolDefaultsOff,
+  toolsDifferWith,
 } from "../db.js";
 import { EXECUTOR_KIND } from "../executor-kind.js";
 import { PORTAL_BROWSER_TOOLS, browserTool } from "../tool-policy.js";
@@ -205,14 +203,14 @@ export function browserRouter(): Router {
       // optional, and the portal works without it.
     }
 
-    // The conversations that disagree with the default, not every one that
-    // may drive it: the browser is on unless switched off, so "all of them"
-    // is the answer almost always and it tells nobody anything.
-    const sessions = browserExceptions();
-    const byDefault = browserByDefault();
-    const routines = getDb()
-      .prepare("SELECT slug, name FROM routines WHERE browser = 1")
-      .all() as { slug: string; name: string }[];
+    // The conversations that disagree with the default, not every one that may
+    // drive it: the browser is on unless switched off, so "all of them" is the
+    // answer almost always and it tells nobody anything. And the routines whose
+    // own switch or tools give their runs the browser, which a routine's runs do
+    // not have until it does. As any tools' exceptions are worked out
+    // (portal.tools.exceptions), with the browser's own policy: where none of
+    // its tools has been seen, its old column still answers.
+    const { byDefault, chats: sessions, routines } = toolsDifferWith(browserPolicy());
 
     const ui = await service.uiState();
     res.json({
@@ -227,7 +225,6 @@ export function browserRouter(): Router {
       // is one that made it so before this could be chosen.
       uiExposed: ui.exposed,
       uiOutdated: ui.outdated,
-      allowlist: browserAllowlist().join("\n"),
       // Whether the tools glide a cursor to what they act on, for whoever watches.
       cursor: browserCursorOn(),
       // Two separate things that each look fine alone: a browser nobody can
@@ -329,14 +326,6 @@ export function browserRouter(): Router {
     if (typeof on !== "boolean") return res.status(400).json({ error: "on must be a boolean" });
     setBrowserCursor(on);
     res.json({ cursor: browserCursorOn() });
-  });
-
-  /** Domains the browser may be pointed at. Empty means no restriction. */
-  router.put("/browser/allowlist", (req, res) => {
-    const domains = req.body?.domains;
-    if (typeof domains !== "string") return res.status(400).json({ error: "domains required" });
-    setBrowserAllowlist(domains);
-    res.json({ allowlist: browserAllowlist().join("\n") });
   });
 
   /**

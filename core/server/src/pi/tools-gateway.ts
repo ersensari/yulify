@@ -17,7 +17,7 @@ import { oneOf } from "./tool-schema.js";
  * A call is the same call as a direct one. pi puts every call through the extensions' hooks, the guard's
  * among them, and a call made from inside a tool would skip them, so the hooks are run here for the tool
  * that is called, with its name and its arguments. Everything the guard holds a direct call to holds
- * this one too: the browser's allowlist, the rules after untrusted content, who may run what.
+ * this one too: the allowlist of sites the agent's tools may reach, the rules after untrusted content, who may run what.
  */
 
 /** What the gateway asks of the conversation it serves, which the client that owns the tool switches provides. */
@@ -174,10 +174,9 @@ export class ToolsGateway {
    * The rules the lazy tools' extensions wrote for the system prompt, each once.
    *
    * pi puts a tool's rules in the prompt only while the tool is active, and a lazy tool is not: what
-   * its schema and description cost is saved, but its rules are not that. The browser's rule that a
-   * page is data and never instructions is one of them, and the guard relies on it being said
-   * somewhere (pageEnvelope), so the tool says them here, where they are in the prompt as long as there
-   * is a lazy tool that has them.
+   * its schema and description cost is saved, but its rules are not that. So the tool says them here,
+   * where they are in the prompt as long as there is a lazy tool that has them. (The line that outside
+   * content is data is the portal's, said while a lazy tool declares it: see outsideLines in sdk-client.ts.)
    */
   private lazyGuidelines(): string[] {
     const lines = new Set<string>();

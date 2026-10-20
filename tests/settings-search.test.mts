@@ -28,6 +28,12 @@ test("single sign-on is found on its own page, by what people call it", () => {
   assert.ok(searchSettings("oidc only", SETTINGS_INDEX).some((e) => e.tab === "authentication" && e.title === "OIDC only"));
 });
 
+test("the sites the agent's tools may reach are found in Settings → Guard, by what people call the list", () => {
+  for (const q of ["allowlist", "browser allowlist", "domains", "sites", "playwright", "erlaubte domänen"]) {
+    assert.ok(searchSettings(q, SETTINGS_INDEX).some((e) => e.tab === "guard" && e.section === "Sites the agent's tools may reach"), `${q} leads to the guard's list`);
+  }
+});
+
 test("where an entry is, is searched too", () => {
   const found = searchSettings("web access brave", [{ tab: "extensions", ext: "npm:pi-web-access", title: "Brave API key", where: "pi-web-access" }]);
   assert.equal(found.length, 1);

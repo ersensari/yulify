@@ -378,18 +378,19 @@ not the primary user, such as the places secrets are kept. (A standing approval 
 the `mcp` call itself.)
 
 Lazy is not a switch. A lazy tool is **on** like any other, and behaves exactly like one: it is run by
-the same code, held to the same [guard](/guide/security) (the [browser](/guide/browser)'s allowlist, the
-rules after untrusted content, what a colleague may run), its arguments are checked and converted as for
-a direct call, and its result is wrapped as somebody else's words where it would be. A picture it shows
-or makes appears in the chat and in voice mode, and the browser's window opens for it, as for a direct call.
+the same code, held to the same [guard](/guide/security) (the [list of sites the agent's tools may
+reach](/guide/browser#where-it-may-go) in Settings → Guard, the rules after untrusted content, what a
+colleague may run), its arguments are checked and converted as for a direct call, and its result is
+wrapped as somebody else's words where it would be. A picture it shows or makes appears in the chat and
+in voice mode, and the browser's window opens for it, as for a direct call.
 Tools that run one at a time, as the browser's do, still do when the model calls several in one message.
 A tool that its extension keeps inactive (one that waits for its moment) is not reached through `tools`
 either, and marking it lazy does not switch it on.
 The one difference is that the model is not shown the tool's schema and description up front. The model
 is shown one short line instead, naming the lazy sets, for example "You have browser tools; search for
 them with the tools tool." The rules the tool's extension wrote for the prompt stay in it as long as the
-tool is lazy, so the [browser](/guide/browser)'s rule that a page is data and never instructions is said as
-before.
+tool is lazy, and so does the portal's rule that outside content, such as a [browser](/guide/browser)'s page,
+is data and never instructions.
 
 The `tools` tool has three actions:
 

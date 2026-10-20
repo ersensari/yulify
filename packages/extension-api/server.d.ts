@@ -9,6 +9,9 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Request, Response, Router, json, raw, text } from "express";
 
+/** What kind of session a chat is: one made in the portal (`task`), one reached through a channel (`agent`), a routine's run, or a heartbeat. */
+export type ChatKind = "task" | "agent" | "routine" | "heartbeat";
+
 /** A chat, as an extension's server half is told of it. */
 export interface Chat {
   id: string;
@@ -18,7 +21,13 @@ export interface Chat {
   status: "idle" | "running" | "error" | "interrupted";
 }
 
-export type ChatLife = "started" | "stopped" | "deleted";
+/**
+ * What happened to a chat's pi: it was `started` or `stopped` (for a reload, for being left idle, or with the
+ * portal); the chat was `deleted`; or it is `finished`: the run it was started for is over, and the portal stopped
+ * its pi for good, as for a routine run in a session of its own. A person who goes on with the chat starts its pi
+ * again (`started`). One stopped for being idle is not finished: it starts again with the next message.
+ */
+export type ChatLife = "started" | "stopped" | "deleted" | "finished";
 export type Upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 export type Ran = { code: number | null; stdout: Buffer; stderr: string };
 
@@ -169,6 +178,40 @@ export interface GitHandle {
   gh(args: string[], options?: GitStepOptions): Promise<GitRan>;
 }
 
+/**
+ * What the guard holds a tool to, as its definition says it: `pi.registerTool({ name, …, guard: { … } })`. Read at
+ * each call, for a tool of `chats.extend` and of any package's pi extension, in a chat whose pi runs in the portal's
+ * own process. A tool that declares no `guard` is trusted as its extension is: what it returns is not marked as
+ * outside content, and of the rules after a suspected prompt injection only `read-credentials` holds it, as it holds
+ * every tool, where its `path` or `file_path` argument names a place secrets are kept. A name like a browser's
+ * (`browser_` at the start, or after `_` or `.`) holds a tool to the browser's rules, declared or not. See "What the
+ * guard holds a tool to" in the guide.
+ */
+export interface ToolGuard {
+  /**
+   * What it returns is outside content: wrapped as data between markers the content cannot close, and flagged where
+   * it tries to instruct the agent, which holds the conversation to the rules after a suspected prompt injection. The
+   * paragraph that says such content is data is the portal's, said once in the prompt while such a tool is on.
+   */
+  outside?: boolean;
+  /**
+   * The names of its parameters that hold an address the agent chose, a URL or a host. Each value a call has in them
+   * (text, or each text of a list) is held to the list of sites in Settings → Guard, where an empty list is any site,
+   * and recorded in Audit.
+   */
+  reaches?: string[];
+  /**
+   * The rules after a suspected prompt injection that every call of it is the shape of: once the conversation has read
+   * a flagged result, a call is held as a command that rule catches. A name that is no rule's is left out.
+   */
+  acts?: ("pipe-to-shell" | "write-to-path" | "upload" | "read-credentials" | "publish" | "persist" | "delegate")[];
+  /**
+   * The names of its parameters that hold files (text, or a list of text): a call is approved for each of those files,
+   * and for nothing else of it. `approvalFiles` on the definition is the older spelling.
+   */
+  files?: string[];
+}
+
 export interface ServerPortal {
   /** Of this interface: raised when something an extension relies on changes. */
   version: 1;
@@ -235,6 +278,16 @@ export interface ServerPortal {
      * that are open.
      */
     offer(tools: () => { name: string; description?: string }[]): void;
+    /**
+     * Where these tools are not what the default says, as the portal works it out now: `byDefault`, whether a chat
+     * that has never said anything about them has any of them on; the chats that have them otherwise, by their own
+     * switches or by their agent's or project's (newest first), each the opposite of `byDefault`; and the routines
+     * whose own switches give their runs another answer than a routine that sets nothing would have in the same place
+     * (by name), each with its runs' answer (`allowed`). A routine that sets nothing has the browser's tools off until
+     * its Browser switch is on, and every other tool as a chat in its place has it. For a page that says who may use
+     * them.
+     */
+    exceptions(names: string[]): { byDefault: boolean; chats: { id: string; title: string; kind: ChatKind }[]; routines: { slug: string; name: string; allowed: boolean }[] };
   };
   extensions: {
     /**
@@ -298,7 +351,7 @@ export interface ServerPortal {
     send(chatId: string, data: unknown): void;
     /** What a page that opens a chat is told first: where things stand. Nothing, to tell it nothing. */
     onOpen(handler: (chatId: string) => unknown): void;
-    /** A chat's pi was started or stopped, or the chat was deleted. */
+    /** A chat's pi was started or stopped, the chat was deleted, or the run it was started for is over (`finished`, see ChatLife). */
     on(event: ChatLife, handler: (chatId: string) => void): void;
     /** Everything a chat's pi says, as it says it: messages as they stream, tool calls, and what the package's own pi extension sends. */
     onEvent(handler: (chatId: string, event: Record<string, unknown>) => void): void;
@@ -316,8 +369,7 @@ export interface ServerPortal {
      * pi as it starts, so its tools hold what this module holds. Only where pi
      * runs in the portal's own process. A tool registered with
      * `offByDefault: true` is off in every chat until somebody switches it on,
-     * and one with `approvalFiles` (names of its parameters that hold files)
-     * is approved for those files, each on its own.
+     * and one with `guard` is held to what it declares: see ToolGuard.
      */
     extend(factory: (pi: any, chat: Chat) => void): void;
     /**

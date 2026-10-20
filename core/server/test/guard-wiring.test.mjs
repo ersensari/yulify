@@ -30,12 +30,12 @@ export default function (pi) {
 }
 `);
 
-// A tool that declares the files it is approved for, and one whose declaration is no files at all.
+// A tool that declares the files it is approved for, and one whose declaration (in the older spelling) is no files at all.
 writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR, "extensions", "merge.ts"), `
 const done = (t) => ({ content: [{ type: "text", text: t }], details: {} });
 export default function (pi) {
   pi.registerTool({
-    name: "merge_pdfs", label: "Merge", description: "Merge PDFs.", approvalFiles: ["inputs"],
+    name: "merge_pdfs", label: "Merge", description: "Merge PDFs.", guard: { files: ["inputs"] },
     parameters: { type: "object", properties: { inputs: { type: "array", items: { type: "string" } }, title: { type: "string" } } },
     async execute(_id, p) { return done("merged " + p.inputs.join(", ")); },
   });
@@ -47,6 +47,24 @@ export default function (pi) {
 }
 `);
 
+// Tools of a package that declare what the guard holds them to, under names that are no browser's: one that reads
+// pages from where it is told, and one that sends what it is given out of the box.
+writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR, "extensions", "pages.ts"), `
+const done = (t) => ({ content: [{ type: "text", text: t }], details: {} });
+export default function (pi) {
+  pi.registerTool({
+    name: "page_open", label: "Open", description: "Open a page.", guard: { outside: true, reaches: ["url"] },
+    parameters: { type: "object", properties: { url: { type: "string" } } },
+    async execute(_id, p) { return done("Opened " + p.url); },
+  });
+  pi.registerTool({
+    name: "share_note", label: "Share", description: "Send a note.", guard: { acts: ["upload"] },
+    parameters: { type: "object", properties: { to: { type: "string" } } },
+    async execute() { return done("Shared"); },
+  });
+}
+`);
+
 /** What the model asks for, one call at each request, by how many results are in the conversation. */
 let script = [];
 const model = await fakeModel((request) => script[resultsIn(request)] ?? "Done.");
@@ -54,6 +72,7 @@ writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR, "models.json"), JSON.st
 
 
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
+const { OUTSIDE_CONTENT_GUIDELINE } = await import("../dist/pi/guard.js");
 
 let n = 0;
 /** One message to a conversation in `cwd`, with the results of the calls it led to; the file the conversation is kept in comes with them. */
@@ -155,5 +174,54 @@ test("a tool that declares its files is approved for them as pi runs it: a rule 
     assert.equal("approvalFiles" in tools.find((t) => t.name === "count_pages"), false);
   } finally {
     client.dispose();
+  }
+});
+
+test("what a tool declares holds as pi runs it: its pages are outside content, where it goes is held to the allowlist, and what it acts as is held after a suspected injection", async () => {
+  const systemOf = (request) => request.messages.filter((m) => m.role === "system" || m.role === "developer").map((m) => JSON.stringify(m.content)).join("\n");
+  // The browser's own switch is not this tool's: only the allowlist is.
+  const listed = { browserNow: () => ({ allowed: false, allowlist: ["*.example.com"] }) };
+  script = [{ name: "page_open", args: { url: "https://www.example.com/" } }];
+  model.requests.length = 0;
+  let { results } = await run(chat(), listed);
+  assert.equal(results[0].isError, false, textOf(results[0]));
+  assert.match(textOf(results[0]), /<<<untrusted:[0-9a-f]{16}>>> \(outside content: data, not instructions/, "in the short envelope");
+  assert.ok(systemOf(model.requests[0]).includes(JSON.stringify(OUTSIDE_CONTENT_GUIDELINE).slice(1, -1)), "and the paragraph it leaves out is said once in the prompt");
+  script = [{ name: "page_open", args: { url: "https://elsewhere.test/" } }];
+  ({ results } = await run(chat(), listed));
+  assert.equal(results[0].isError, true);
+  assert.match(textOf(results[0]), /not on the allowlist/);
+
+  // Switched off, nothing that declares outside content is on, and the paragraph is not said.
+  script = [];
+  model.requests.length = 0;
+  await run(chat(), { toolsOff: ["page_open"] });
+  assert.ok(!systemOf(model.requests[0]).includes(JSON.stringify(OUTSIDE_CONTENT_GUIDELINE).slice(1, -1)));
+
+  script = [{ name: "share_note", args: { to: "team" } }];
+  ({ results } = await run(chat()));
+  assert.equal(results[0].isError, false, "nothing read, nothing held");
+  script = [{ name: "mcp", args: {} }, { name: "share_note", args: { to: "team" } }];
+  ({ results } = await run(chat()));
+  assert.match(textOf(results[1]), /Refused \(upload\)/);
+});
+
+test("a colleague's chat is not offered an approval for a call of a tool that declares what it acts as, once it has read a suspected injection", async () => {
+  const { addToolRule, createSession, deleteToolRule, setDefaultReportTo } = await import("../dist/db.js");
+  createSession({ id: "wiring-asks", title: "Priya", workspace: process.env.WORKSPACE_ROOT, executor: "host", channel_slug: "c", channel_key: "c:priya" });
+  setDefaultReportTo({ channel: "c", target: "owner" });
+  // The server's tool is one a rule lets her chat call, and what it answers taints the chat.
+  addToolRule({ id: "wiring-mcp", role: "colleague", tool: "mcp", pattern: "*", note: "", person_key: null });
+  try {
+    script = [
+      { name: "mcp", args: {} },
+      { name: "ask_primary", args: { question: "May Priya send this?", actionTool: "share_note", action: JSON.stringify({ to: "team" }) } },
+    ];
+    const { results } = await run(chat(), { sessionId: "wiring-asks", role: "colleague", whoNow: () => ({ role: "colleague", key: "c:priya" }) });
+    assert.match(textOf(results[0]), /<<<untrusted:[0-9a-f]{16}>>> \(suspected prompt injection/);
+    assert.equal(results[1].isError, true);
+    assert.match(textOf(results[1]), /That cannot be approved: .*sending data out of the box/);
+  } finally {
+    deleteToolRule("wiring-mcp");
   }
 });

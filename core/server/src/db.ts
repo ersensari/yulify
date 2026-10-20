@@ -3,7 +3,7 @@ import { inTurnWithSettings, piSetting, readPiSettings, readProjectPiSettings } 
 import { packageIndex, packageKey, packageLabel, toolAvailability } from "./extension-switch.js";
 import { UNDERSTORY } from "./features.js";
 import { GUARD_RULE_NAMES } from "./pi/guard-rule-names.js";
-import { BUILT_IN_SET, PI_BUILT_IN_TOOLS, PORTAL_BROWSER_TOOLS, browserTool, defaultsFor, lazyToolEntry, mcpServerOf, toolEnabled, toolSetOf } from "./tool-policy.js";
+import { BUILT_IN_SET, PI_BUILT_IN_TOOLS, browserTool, defaultsFor, lazyToolEntry, mcpServerOf, toolEnabled, toolSetOf } from "./tool-policy.js";
 import { projectOf } from "./workspaces.js";
 import { browserServers, dropMcpCache, mcpAdapter, mcpCachePath, mcpConfigPath, mcpServerNames, onMcpWritten, readMcpCache, readMcpFile, readableMcpConfig, serversAndBrowsers } from "./api/mcp.js";
 import { mcpCatalogue, mcpDirect, mcpOffer, unlisted, type McpOffer } from "./mcp-offer.js";
@@ -2048,19 +2048,21 @@ function browserAdoptionPending(): boolean {
  * The `sessions.browser` column is what that second place was. It is still
  * read, and not to be dropped: here while no browser tool has been seen (see
  * `browserColumnDecides`, which a container deployment always is), by
- * `adoptBrowserGrants` to carry the grants over, and by `browserExceptions`.
+ * `adoptBrowserGrants` to carry the grants over, and where the conversations
+ * that differ from the default are listed (see chatsDifferingWith).
  */
 export function browserAllowed(session: SessionRow): boolean {
-  return browserAllowedWith(session, browserPolicy());
+  return toolsOnWith(session, browserPolicy());
 }
 
 /**
- * What the answer is worked out from apart from the conversation asked about:
- * the browser's tools as far as they have been seen, the defaults, and whether
- * the old column decides. A pass over many conversations asks for it once. Each
- * of them used to read the MCP file three times and the settings table twice.
+ * What the answer for some tools is worked out from apart from the conversation
+ * asked about: the tools (the browser's, as far as they have been seen), the
+ * defaults, and whether the old column decides. A pass over many conversations
+ * asks for it once. Each of them used to read the MCP file three times and the
+ * settings table twice.
  */
-export interface BrowserPolicy {
+export interface ToolsPolicy {
   names: string[];
   /** With none of its tools seen: whether the old column is what answers. */
   columnDecides: boolean;
@@ -2071,13 +2073,22 @@ export interface BrowserPolicy {
   homes?: AgentHome[];
 }
 
-export function browserPolicy(): BrowserPolicy {
+/** The browser's: its tools as far as they have been seen, and with none seen, whether its old column answers. */
+export function browserPolicy(): ToolsPolicy {
   const names = seenBrowserTools();
   return { names, columnDecides: names.length ? false : browserColumnDecides(), defaultsOff: toolDefaultsOff(), projects: new Map() };
 }
 
-/** `browserAllowed`, against a policy asked for once; `exceptions` are the conversation's own, where the caller has them already. */
-export function browserAllowedWith(session: SessionRow, policy: BrowserPolicy, exceptions?: SessionTools): boolean {
+/**
+ * The same for any tools, by name, whether or not a session has registered them: a tool nobody switched off is on.
+ * There are names, so the old column never answers.
+ */
+function toolPolicy(names: string[]): ToolsPolicy {
+  return { names: [...new Set(names)], columnDecides: false, defaultsOff: toolDefaultsOff(), projects: new Map() };
+}
+
+/** Whether any of the policy's tools is on for a session (`browserAllowed` for the browser's); `exceptions` are the conversation's own, where the caller has them already. */
+export function toolsOnWith(session: Pick<SessionRow, "id" | "kind" | "routine_slug" | "workspace" | "browser">, policy: ToolsPolicy, exceptions?: SessionTools): boolean {
   const routine = routineOf(session);
   if (routine) {
     const row = getDb().prepare("SELECT browser FROM routines WHERE slug = ?").get(routine) as { browser: number } | undefined;
@@ -2165,14 +2176,40 @@ export function browserConfigured(): boolean {
 }
 
 /**
- * The conversations that disagree with the default about the browser.
+ * Where some tools are not what the default says: whether a conversation that has never said anything about them
+ * has any of them on, the chats that have them otherwise, and the routines whose own settings give their runs
+ * another answer than a routine that sets nothing would have, each with that answer. What `portal.tools.exceptions`
+ * answers.
+ */
+export interface ToolsDiffer {
+  byDefault: boolean;
+  /** Newest first. Each has the other answer to `byDefault`. */
+  chats: SessionRow[];
+  /** By name. */
+  routines: { slug: string; name: string; allowed: boolean }[];
+}
+
+/** Where these tools are not what the default says (see ToolsDiffer). None named: none is on anywhere. */
+export function toolExceptions(names: string[]): ToolsDiffer {
+  if (!names.length) return { byDefault: false, chats: [], routines: [] };
+  return toolsDifferWith(toolPolicy(names));
+}
+
+/** Where the policy's tools are not what the default says, the policy asked for once. */
+export function toolsDifferWith(policy: ToolsPolicy): ToolsDiffer {
+  const byDefault = toolsByDefaultWith(policy);
+  return { byDefault, chats: chatsDifferingWith(policy, byDefault), routines: routinesDifferingWith(policy) };
+}
+
+/**
+ * The conversations whose answer for the policy's tools is not `byDefault`.
  *
  * Every one that says anything about tools, and every one that holds the old
- * grant, is asked — not those whose switches happen to mention the word
+ * browser grant, is asked — not those whose switches happen to mention the word
  * `browser`, which is not what a server is called when it is called something
  * else, and misses the column where that is still the only record.
  */
-export function browserExceptions(): SessionRow[] {
+function chatsDifferingWith(policy: ToolsPolicy, byDefault: boolean): SessionRow[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM sessions
@@ -2199,19 +2236,33 @@ export function browserExceptions(): SessionRow[] {
     rows.sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   }
   // The policy once for all of them, and what each says about tools from the row that was read.
-  const policy = browserPolicy();
-  const byDefault = browserByDefaultWith(policy);
   return rows.filter(
-    (row) => browserAllowedWith(row, policy, { off: parseToolsOff(row.tools_off), on: parseToolsOff(row.tools_on) }) !== byDefault
+    (row) => toolsOnWith(row, policy, { off: parseToolsOff(row.tools_off), on: parseToolsOff(row.tools_on) }) !== byDefault
   );
 }
 
-/** Is the browser on for a conversation that has never said anything about it? */
-export function browserByDefault(): boolean {
-  return browserByDefaultWith(browserPolicy());
+/**
+ * The routines whose own lists and switch give their runs another answer for the policy's tools than a routine that
+ * sets nothing would have in the same place: a run as it starts, with what its agent and its project say, and nothing
+ * of a chat's own. Each with its runs' answer.
+ */
+function routinesDifferingWith(policy: ToolsPolicy): { slug: string; name: string; allowed: boolean }[] {
+  const rows = getDb().prepare("SELECT slug, name, workspace FROM routines ORDER BY name COLLATE NOCASE").all() as { slug: string; name: string; workspace: string | null }[];
+  const homes = (policy.homes ??= agentHomes());
+  // A new routine's lists and switch: see routineTools for what its switch answers for.
+  const unsaid = routineLayer({ tools_off: "", tools_on: "", browser: 0 });
+  return rows.flatMap((row) => {
+    // Where its runs work: its project's folder, or Home.
+    const workspace = row.workspace ?? agentHomePath();
+    const allowed = toolsOnWith({ id: "", kind: "routine", routine_slug: row.slug, workspace, browser: 0 }, policy, { off: [], on: [] });
+    const unsaidOff = defaultsFor(toolDefaultsFor(workspace, null, undefined, policy.defaultsOff, homes), unsaid);
+    const otherwise = policy.names.some((name) => toolEnabled(name, unsaidOff, { off: [], on: [] }));
+    return allowed === otherwise ? [] : [{ slug: row.slug, name: row.name, allowed }];
+  });
 }
 
-function browserByDefaultWith(policy: BrowserPolicy): boolean {
+/** Whether any of the policy's tools is on for a conversation that has never said anything about them. */
+function toolsByDefaultWith(policy: ToolsPolicy): boolean {
   if (!policy.names.length) return !policy.columnDecides;
   const off = new Set(policy.defaultsOff);
   return policy.names.some((name) => !off.has(name));
@@ -2421,7 +2472,11 @@ export function routineTools(slug: string, browser: string[] = seenBrowserTools(
   const row = getDb().prepare("SELECT tools_off, tools_on, browser FROM routines WHERE slug = ?").get(slug) as
     | { tools_off: string; tools_on: string; browser: number }
     | undefined;
-  if (!row) return { off: [], on: [] };
+  return row ? routineLayer(row, browser) : { off: [], on: [] };
+}
+
+/** A routine's lists and switch, as the layer they are for its runs: see routineTools. */
+function routineLayer(row: { tools_off: string; tools_on: string; browser: number }, browser: string[] = seenBrowserTools()): SessionTools {
   const own = { off: parseToolsOff(row.tools_off), on: parseToolsOff(row.tools_on) };
   const unnamed = browser.filter((name) => !own.off.includes(name) && !own.on.includes(name));
   return row.browser === 1 ? { off: own.off, on: [...own.on, ...unnamed] } : { off: [...own.off, ...unnamed], on: own.on };
@@ -2618,7 +2673,7 @@ export function lazyAllowed(
   // Never in what the model is offered, so a mark would keep nothing out of the prompt: it is code mode's description that carries it.
   if (tool.scriptsOnly) return false;
   if (tool.cached || adapterTool({ source: tool.source, package: tool.package })) return false;
-  if (!noServerOf(tool.name) && mcpServerOf(tool.name, servers) !== undefined) return false;
+  if (!noServerOf(tool) && mcpServerOf(tool.name, servers) !== undefined) return false;
   if (PI_BUILT_IN_TOOLS.includes(tool.name)) return false;
   // Code mode is the way to make many calls in one: reached through another tool it would be one more step to it, and the
   // box the lists show it in has no set of its own on the server to mark.
@@ -2905,10 +2960,10 @@ export function forgetPackageTools(spec: string): void {
  * `before` is the servers as they were, because a tool is told to a server by
  * its name (`browser_staging_click` is not the tool of `browser`) and that
  * needs the longer name to still be there; `after` is what is left. The
- * portal's own browser tools and the adapter's own are the ones a server's
- * name can claim without being its, and they stay. The defaults and exceptions
- * somebody set for the tools are kept, as for any tool that is not loaded: a
- * server that comes back gets them back.
+ * adapter's own tools and those of the portal's inline extensions are the ones
+ * a server's name can claim without being its, and they stay. The defaults and
+ * exceptions somebody set for the tools are kept, as for any tool that is not
+ * loaded: a server that comes back gets them back.
  */
 export function mcpServersRemoved(before: string[], after: string[]): void {
   const removed = before.filter((name) => !after.includes(name));
@@ -2919,7 +2974,7 @@ export function mcpServersRemoved(before: string[], after: string[]): void {
   const all = knownTools();
   const kept = all.filter((t) => {
     // A server's name is also the start of other tools' names: `web` and pi-web-access's `web_search`.
-    if (!adapterTool(t) || noServerOf(t.name)) return true;
+    if (!adapterTool(t) || noServerOf(t)) return true;
     const server = mcpServerOf(t.name, before);
     return server === undefined || !removed.includes(server);
   });
@@ -2944,8 +2999,14 @@ function setRemovedMcpServers(names: string[]): void {
 
 const ADAPTER_LABEL = "pi-mcp-adapter";
 
-/** The tools that carry no server's name: the adapter's own and the portal's browser tools, which a server's name can start without them being its. */
-const noServerOf = (name: string): boolean => (PORTAL_BROWSER_TOOLS as readonly string[]).includes(name) || name === "mcp" || name === "mcp_script" || name === "mcpScript";
+/**
+ * The tools that are no server's, though a server's name can start theirs: the adapter's own, by their names, and
+ * every tool the portal's inline extensions register (its own, and each server half's under its package's name),
+ * which no MCP server brings. Told by what is known of the tool, not by a list of names: a package's `browser_open`
+ * is not the tool of a server called `browser`.
+ */
+const noServerOf = (tool: { name: string; inline?: boolean }): boolean =>
+  tool.inline === true || tool.name === "mcp" || tool.name === "mcp_script" || tool.name === "mcpScript";
 
 /** Does the MCP adapter register this tool? By its package where it is recorded, by the label it is filed under where it is not. */
 export function adapterTool(t: Pick<KnownTool, "source" | "package">): boolean {
@@ -3022,10 +3083,10 @@ function readMcpView(): McpView {
     ...(t.description ? { description: t.description } : {}),
   }));
   const offers = (tool: Pick<KnownTool, "name" | "source" | "package">) =>
-    adapterTool(tool) && !noServerOf(tool.name) ? offer(tool.name) : undefined;
+    adapterTool(tool) && !noServerOf(tool) ? offer(tool.name) : undefined;
   const directly = mcpDirect(config, cache);
   const direct = (tool: Pick<KnownTool, "name" | "source" | "package">) =>
-    adapterTool(tool) && !noServerOf(tool.name) ? directly(tool.name) : undefined;
+    adapterTool(tool) && !noServerOf(tool) ? directly(tool.name) : undefined;
   let reachable: Set<string> | undefined;
   const serverTool = (name: string) => {
     if (!reachable) {
@@ -3063,24 +3124,28 @@ onMcpWritten((before) => {
 });
 
 /**
- * The tools of these that the MCP adapter no longer registers, by name: what a
- * chat's pi is told to have off on top of its switches, so that one still
- * holding such a tool from before the configuration changed cannot use it.
- * Told by what the portal remembers of each, which is what says it is the
- * adapter's; a name it has never seen is not judged — unless a server the
- * portal removed claims it: removing a server forgets its tools, and a chat
- * still running with it would otherwise go on using the tools of a server that
- * is gone, where one merely switched off would have them off.
+ * The tools of these, as a chat reported them, and of those the portal
+ * remembers, that the MCP adapter no longer registers, by name: what a chat's
+ * pi is told to have off on top of its switches, so that one still holding
+ * such a tool from before the configuration changed cannot use it. Told by
+ * what the portal remembers of each, which is what says it is the adapter's;
+ * a name it has never seen is not judged — unless a server the portal removed
+ * claims it and the chat's report does not make it one of no server's
+ * (noServerOf): removing a server forgets its tools, and a chat still running
+ * with it would otherwise go on using the tools of a server that is gone,
+ * where one merely switched off would have them off.
  */
-export function withdrawnMcpTools(names: Iterable<string> = [], view: McpView = mcpView()): string[] {
+export function withdrawnMcpTools(reported: Iterable<{ name: string; inline?: boolean }> = [], view: McpView = mcpView()): string[] {
   const known = view.known();
   const { servers, gone } = view;
+  const asReported = new Map<string, { name: string; inline?: boolean }>();
+  for (const tool of reported) if (!asReported.has(tool.name)) asReported.set(tool.name, tool);
   const withdrawn = new Set<string>();
-  for (const name of new Set([...names, ...known.keys()])) {
+  for (const name of new Set([...asReported.keys(), ...known.keys()])) {
     const tool = known.get(name);
     if (tool) {
       if (view.offers(tool) === "withdrawn") withdrawn.add(name);
-    } else if (gone.length && !noServerOf(name) && gone.includes(mcpServerOf(name, [...servers, ...gone]) ?? "")) {
+    } else if (gone.length && !noServerOf(asReported.get(name) ?? { name }) && gone.includes(mcpServerOf(name, [...servers, ...gone]) ?? "")) {
       withdrawn.add(name);
     }
   }
@@ -3140,15 +3205,15 @@ export function rememberTools(reported: KnownTool[]): string[] {
   // since removed: its tools are the adapter's, and would be written straight back.
   // Only the servers the portal removed count: the adapter also loads some from
   // a project's own files, which are not in the portal's mcp.json and are no
-  // removed server's. The adapter's own tools and the portal's browser tools
-  // are no server's.
+  // removed server's. The adapter's own tools and those of the portal's inline
+  // extensions are no server's.
   const configured = readMcpFile();
   const gone = removedMcpServers().filter((name) => !Object.hasOwn(configured.config.mcpServers, name));
   const noServer = (t: KnownTool) =>
     gone.length > 0 &&
     !configured.error &&
     adapterTool(t) &&
-    !noServerOf(t.name) &&
+    !noServerOf(t) &&
     // Told apart from the configured servers too: `notes` removed leaves `notes_staging_read` to the server that is still there.
     gone.includes(mcpServerOf(t.name, [...Object.keys(configured.config.mcpServers), ...gone]) ?? "");
   const tools = reported.filter(

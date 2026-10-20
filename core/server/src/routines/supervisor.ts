@@ -4,7 +4,6 @@ import { agentHome } from "../agent-home.js";
 import { checkWorkspace } from "../workspaces.js";
 import { EXECUTOR_KIND } from "../executor-kind.js";
 import { sessions } from "../session-manager.js";
-import { forgetBrowserSession } from "../browser/tools.js";
 import { isDue, nextRun, parseCron } from "./cron.js";
 import { reportFraming, reportToFor } from "../pi/report-tool.js";
 
@@ -229,7 +228,7 @@ class RoutineSupervisor {
         // Looked at now: the job was started by the last call, a moment ago. A portal that is stopping lets every pi go.
         if (sessions.closing || !(await sessions.holdsJobs(fresh.id, true))) {
           await sessions.stop(fresh.id).catch(() => {});
-          forgetBrowserSession(fresh.id);
+          sessions.finished(fresh.id);
         }
       }
       // A one-off has nothing left to do. Disabled rather than deleted, so the

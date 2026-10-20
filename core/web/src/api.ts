@@ -834,17 +834,15 @@ export const api = {
   setGuardRoutine: (id: string, exempt: string[]) =>
     json<{ id: string; exempt: string[] }>(`/api/guard/routines/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ exempt }) }),
   revokeApproval: (id: string) => json<{ ok: true }>(`/api/guard/approvals/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** The sites the agent's tools may reach: one domain per line, empty for any site. */
+  setGuardAllowlist: (domains: string) =>
+    json<{ allowlist: string }>("/api/guard/allowlist", { method: "PUT", body: JSON.stringify({ domains }) }),
   untrustResult: (sessionId: string, id: string) =>
     json<{ ok: true }>(`/api/guard/trusted/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
   setSandbox: (policy: SandboxPolicy) =>
     json<{ policy: SandboxPolicy; report: SandboxReport; chats: { reloaded: number; waiting: number } }>("/api/sandbox", { method: "PUT", body: JSON.stringify(policy) }),
   setBrowserCursor: (on: boolean) =>
     json<{ cursor: boolean }>("/api/browser/cursor", { method: "PUT", body: JSON.stringify({ on }) }),
-  setBrowserAllowlist: (domains: string) =>
-    json<{ allowlist: string }>("/api/browser/allowlist", {
-      method: "PUT",
-      body: JSON.stringify({ domains }),
-    }),
 
   audit: (limit = 200) => json<{ entries: AuditEntry[] }>(`/api/audit?limit=${limit}`),
   /** Up to and including `through`, the newest entry the caller has seen. */
@@ -1713,7 +1711,6 @@ export interface BrowserStatus {
   uiExposed: boolean;
   /** A container made before the port was kept to one address: it answers every machine until it is installed again. */
   uiOutdated: boolean;
-  allowlist: string;
   /** Whether the browser tools glide a cursor to what they act on. */
   cursor: boolean;
   /** Is the browser wired up at all, whether or not it is running right now? */
@@ -1770,6 +1767,8 @@ export interface GuardState {
   /** The MCP servers, and whether each is counted as the person's own; the browser's never is. */
   servers: { name: string; trusted: boolean; browser: boolean }[];
   routines: { id: string; name: string; exempt: string[] }[];
+  /** The sites the agent's tools may reach, one domain per line; empty for any site. */
+  allowlist: string;
   approvals: { id: string; sessionId: string; chat: string | null; tool: string; subject: string; expiresAt: string }[];
   trusted: { sessionId: string; chat: string | null; results: { id: string; tool?: string; signals?: string[]; excerpt?: string }[] }[];
 }
