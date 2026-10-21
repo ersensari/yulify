@@ -83,7 +83,8 @@ default**:
   a drop-down list does the same.
 - **Settings.** The side navigation comes in line by line, the page you pick
   slides in, and a switch's knob bounces.
-- **The Browser page.** Its screen switches on like an old tube.
+- **The browser.** Its screen switches on like an old tube, on the Browser page,
+  beside a chat and in voice mode. See [The agent's browser](/guide/browser).
 - **Voice mode.** The orb comes up out of a swell of light, and the windows that
   open on its stage overshoot into place.
 - **Pictures being made.** While the agent has a picture made or changed, a soft
