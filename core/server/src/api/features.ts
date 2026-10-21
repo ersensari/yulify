@@ -18,9 +18,11 @@ import {
 import { readPiSettings, updatePiSettings } from "../pi-settings.js";
 import { sessions } from "../session-manager.js";
 import { followPackages, switchPackage } from "./extensions.js";
-import { ADAPTER_SPEC, mcpAdapter, readMcpFile, writeMcpFile } from "./mcp.js";
+import { mcpAdapter, mcpServer, readMcpFile } from "./mcp.js";
+import { setMcpServer } from "../mcp-entry.js";
+import { memoryHolder } from "../memory-holder.js";
 import * as service from "../extensions/understory-service.js";
-import { readModelsJson } from "../providers.js";
+import { modelProviders } from "../models.js";
 import { pi } from "./packages.js";
 import { serverTimeZone } from "../time-zone.js";
 
@@ -46,10 +48,9 @@ function shownConfig() {
 
 /** Providers set up here that have an address Understory can be pointed at, with their models. */
 function providersForUnderstory() {
-  const providers = readModelsJson().providers ?? {};
-  return Object.entries<Record<string, any>>(providers)
-    .filter(([, p]) => p && typeof p.baseUrl === "string" && Array.isArray(p.models))
-    .map(([id, p]) => ({ id, models: p.models.filter((m: any) => typeof m?.id === "string").map((m: any) => String(m.id)) }));
+  return modelProviders()
+    .filter((p) => p.baseUrl !== undefined)
+    .map(({ provider, models }) => ({ id: provider, models }));
 }
 
 async function understoryState() {
@@ -89,29 +90,21 @@ async function understoryState() {
  * otherwise the address given, or the one there before.
  */
 async function switchUnderstory(enabled: boolean, url?: string): Promise<void> {
-  const { config, error } = readMcpFile();
-  if (error) throw Object.assign(new Error(`Fix mcp.json first: ${error}`), { status: 409 });
-  if (enabled) {
-    // The adapter is what makes an MCP server into tools; without it the entry does nothing.
-    const adapter = adapterEntry();
-    if (!adapter) await pi(["install", ADAPTER_SPEC]);
-    else if (!adapter.enabled) await switchPackage(adapter.source, true);
-    await followPackages();
-    // Kept: whatever else somebody put in the entry by hand, except how it signs in, which is said anew.
-    const { disabled: _off, auth: _a, bearerToken: _t, bearerTokenEnv: _e, ...had } = (config.mcpServers[UNDERSTORY] ?? {}) as Record<string, unknown>;
-    // An address given is the one meant; without one, the portal's own Understory where it runs one.
-    config.mcpServers[UNDERSTORY] = url === undefined && (await service.installed())
+  if (!enabled) return setMcpServer(UNDERSTORY, undefined);
+  // Kept: whatever else somebody put in the entry by hand, except how it signs in, which is said anew.
+  const { disabled: _off, auth: _a, bearerToken: _t, bearerTokenEnv: _e, ...had } = mcpServer(UNDERSTORY)?.entry ?? {};
+  // An address given is the one meant; without one, the portal's own Understory where it runs one.
+  await setMcpServer(
+    UNDERSTORY,
+    url === undefined && (await service.installed())
       ? { ...had, ...understoryEntry(service.managedUrl(), { token: service.token() }) }
       : {
           ...had,
           ...understoryEntry(url ?? (typeof had.url === "string" && had.url ? had.url : understoryDefaultUrl()), {
             ...(process.env[UNDERSTORY_TOKEN_ENV] ? { tokenEnv: UNDERSTORY_TOKEN_ENV } : {}),
           }),
-        };
-  } else {
-    delete config.mcpServers[UNDERSTORY];
-  }
-  writeMcpFile(config);
+        },
+  );
 }
 
 /** The model a request names, checked; undefined when it names none that can be used. */
@@ -157,7 +150,13 @@ export function featuresRouter(): Router {
    */
   router.get("/features/flags", (_req, res) => {
     try {
-      res.json({ subagent: { enabled: subagentState().enabled }, understory: { enabled: understoryOn() } });
+      const holder = memoryHolder();
+      res.json({
+        subagent: { enabled: subagentState().enabled },
+        understory: { enabled: understoryOn() },
+        // What holds the agent's memory, where something does: its label.
+        memory: { held: holder !== undefined, by: holder?.label ?? null },
+      });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
     }

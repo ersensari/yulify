@@ -212,6 +212,55 @@ export interface ToolGuard {
   files?: string[];
 }
 
+/** A model, by its provider and its id, as pi names them (`provider/id`). */
+export interface ModelRef {
+  provider: string;
+  id: string;
+}
+
+/** Where a model is asked, and how a request signs in there: see `models.endpoint`. */
+export interface ModelEndpoint {
+  /** What it speaks, as pi says it: "openai-completions", "anthropic-messages"… */
+  api: string;
+  /** Its address, with no slash at the end, or "" where pi has none: for "openai-completions", where `/chat/completions` is. */
+  baseUrl: string;
+  /** The headers its provider adds to a request. The key is not among them: see `key`. */
+  headers: Record<string, string>;
+  /**
+   * The provider's key, where it has one. A request carries it as `api` takes a key: for "openai-completions", as
+   * `authorization: Bearer <key>`.
+   */
+  key?: string;
+  /**
+   * The provider's key is a command pi runs (`!…`), whose answer is `key`: fit for a request now, not for keeping
+   * where it outlives the request, such as a container's environment.
+   */
+  keyFromCommand: boolean;
+}
+
+/** A provider set up by its address (pi's models.json), with its models: see `models.list`. */
+export interface ModelProvider {
+  provider: string;
+  /** What it speaks, where models.json says it for the provider. */
+  api?: string;
+  baseUrl?: string;
+  /** Its models' ids. */
+  models: string[];
+}
+
+/** One server of pi's mcp.json, in the shape pi-mcp-adapter reads: `url`, `command` or `socket`, and what else the adapter takes. */
+export type McpEntry = Record<string, unknown>;
+
+/** What holds the agent's memory in place of MEMORY.md: see `memory.hold`. */
+export interface MemoryHolder {
+  /** What the portal calls it where it says what holds the memory. */
+  label: string;
+  /** Said to the agent in a chat with the person, in place of MEMORY.md: how to reach the memory, and when. */
+  rule: string;
+  /** Whether it holds the memory now. Asked each time a chat's prompt is built: keep it quick, and give a boolean, not a promise. */
+  on(): boolean;
+}
+
 /**
  * How a speech service is spoken to, as voice mode knows it: `audio-cpp` (Breeze on audio.cpp, streamed), `kokoro` and
  * `chatterbox` (on audio.cpp, a WAV for each phrase) and `breeze` (Breeze's Python service). See "Speech runtimes" in
@@ -324,6 +373,56 @@ export interface ServerPortal {
      * started again when such an extension comes or goes. Naming one that is in neither is an error.
      */
     use<T = unknown>(name: string): T | undefined;
+  };
+  /**
+   * The models the chats use, and how to reach them: for a server half that asks a model itself, such as the one the
+   * chat asking it is on.
+   */
+  models: {
+    /**
+     * The model a chat is on now: the one its pi has, where it runs, else the one stored for it. Without a chat, the
+     * one new chats start on. Nothing for a chat that is not known, or where no model is chosen.
+     */
+    of(chatId?: string): Promise<ModelRef | undefined>;
+    /**
+     * Where a model pi knows is asked, with the provider's key: rejects for one it does not know. The key is the
+     * person's, for that model's own address.
+     */
+    endpoint(provider: string, id: string): Promise<ModelEndpoint>;
+    /** The providers set up by their address (pi's models.json), with their models. Services pi has built in are not listed. */
+    list(): ModelProvider[];
+  };
+  /**
+   * MCP servers, as pi-mcp-adapter makes them the chats' tools: named `<server>_<tool>`, and switched in Settings → MCP
+   * and Settings → Tools as any other server's are.
+   */
+  mcp: {
+    /**
+     * The server of that name in pi's mcp.json, and whether the chats have its tools now (`on`): it is there, not
+     * switched off, and pi-mcp-adapter, which makes its tools, is installed and on. The file is read again only when
+     * it, or pi's settings, changed. Nothing where there is no such server, or the file cannot be read.
+     */
+    get(name: string): { entry: McpEntry; on: boolean } | undefined;
+    /**
+     * Writes the server of that name into pi's mcp.json (a file for the portal's user alone), in place of what was
+     * there under that name, or removes it (`undefined`). Writing one installs pi-mcp-adapter where it is not
+     * installed, and switches it on where it is off, which waits for the server halves to follow: not while this
+     * half starts. `trusted`: the person counts what its tools return as their own, not outside content; the name
+     * is added to Settings → Guard's trusted servers, where they can take it out. Removing the server takes the name
+     * out of them again, so a server given that name later is not trusted unasked. Then the idle chats are loaded
+     * again, as `chats.reload` does. Rejects while the file cannot be read, which is the person's to fix in
+     * Settings → MCP, and for a name or a server the adapter would not take.
+     */
+    set(name: string, entry: McpEntry | undefined, options?: { trusted?: boolean }): Promise<void>;
+  };
+  memory: {
+    /**
+     * Says that this extension holds the agent's memory, while its server half runs and `on()` says so: a chat with
+     * the person then does not read the agent's MEMORY.md, and is told `rule` in its place. A project linked to an
+     * agent can do without it, and a blank one never has it. One extension holds it: the first that asks. One that
+     * asks while another does is refused, with a line in the log.
+     */
+    hold(holder: MemoryHolder): void;
   };
   /**
    * Voice mode's sources: the person chooses in Settings → Add-ons → Voice whether it listens and speaks at addresses of

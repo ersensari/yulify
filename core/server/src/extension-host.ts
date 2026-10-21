@@ -7,7 +7,7 @@ import semver from "semver";
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from "express";
 import { agentOf, defaultAgent, listAgents } from "./agents.js";
 import { DATA_DIR } from "./data-dir.js";
-import { getSession, getSetting, listSessions, putSetting, sessionsByWorkspace, setServerHalfOffers, toolExceptions, type SessionRow } from "./db.js";
+import { getSession, getSetting, listSessions, putSetting, sessionsByWorkspace, setServerHalfOffers, setTrustedMcpServers, toolExceptions, trustedMcpServers, untrustMcpServer, type SessionRow } from "./db.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
 import { takes, type ServerHalf } from "./extension-ui.js";
 import { asAgent, runAsAgent, sandboxEnv } from "./sandbox/exec.js";
@@ -21,6 +21,9 @@ import { personsEnv } from "./background.js";
 import { gitAt } from "./git.js";
 import { folderAllowed, folderLabel, listFolders } from "./agent-folders.js";
 import { handoffDone, takeHandoff } from "./handoff.js";
+import { modelEndpoint, modelOf, modelProviders, type LiveModel } from "./models.js";
+import { mcpServer } from "./api/mcp.js";
+import { holdMemory } from "./memory-holder.js";
 import type { Chat, ChatLife as Life, Ran, ServerPortal, Upgrade, VoiceProvider } from "@pithagoras/extension-api/server";
 
 /**
@@ -113,6 +116,8 @@ interface Running {
   offers?: () => OfferedTool[];
   /** What it is told when the portal deletes a folder the agents work in (`folders.on("removed")`). */
   removed: ((folder: string) => void)[];
+  /** Its stops have run, or are running: what it registers after that would never be let go. */
+  stopped?: boolean;
   /** Where it offers voice mode to listen and speak (`voice.provide`). */
   voice?: VoiceProvider;
 }
@@ -255,10 +260,12 @@ function wire(name: string, data: unknown): string | undefined {
 let tellChat: (chatId: string, extension: string, data: unknown) => Promise<boolean> = async () => false;
 let toolOffered: (chatId: string, tool: string) => "direct" | "lazy" | undefined = () => undefined;
 let reloadChats: () => Promise<{ reloaded: number; waiting: number }> = async () => ({ reloaded: 0, waiting: 0 });
-export function setChatBridge(bridge: { tell: typeof tellChat; offers: typeof toolOffered; reload: typeof reloadChats }): void {
+let liveModel: LiveModel = async () => undefined;
+export function setChatBridge(bridge: { tell: typeof tellChat; offers: typeof toolOffered; reload: typeof reloadChats; model: LiveModel }): void {
   tellChat = bridge.tell;
   toolOffered = bridge.offers;
   reloadChats = bridge.reload;
+  liveModel = bridge.model;
 }
 /** How a server half makes itself voice mode's source (`voice.choose`): the voice settings are the voice routes', which import the host. */
 let chooseVoice: (name: string, chosen: boolean) => void = () => {};
@@ -364,6 +371,40 @@ function portalFor(ext: Running): ServerPortal {
         return ext.apis.get(of) as never;
       },
     },
+    models: {
+      of: (chatId) => modelOf(chatId, liveModel),
+      endpoint: (provider, id) => modelEndpoint(provider, id),
+      list: () => modelProviders(),
+    },
+    mcp: {
+      get: (server) => mcpServer(server),
+      async set(server, entry, options = {}) {
+        // Imported when first asked: it installs packages through what starts and stops these halves, which imports this module.
+        const { setMcpServer } = await import("./mcp-entry.js");
+        await setMcpServer(server, entry);
+        // Counted as the person's own on the extension's word, and no longer once the server is gone: Settings → Guard
+        // lists only the servers there are, so a name left trusted could not be taken out, and would trust whatever
+        // server is given that name next.
+        if (entry === undefined) untrustMcpServer(server);
+        else if (options.trusted === true) setTrustedMcpServers([...trustedMcpServers(), server]);
+        await reloadChats();
+      },
+    },
+    memory: {
+      hold(holder) {
+        const { label, rule } = holder ?? {};
+        if (typeof label !== "string" || !label.trim() || typeof rule !== "string" || !rule.trim() || typeof holder.on !== "function") {
+          throw new TypeError("hold takes { label, rule, on }: two texts, and a function that says whether it holds the memory now");
+        }
+        // Its module still running after its half stopped, or failed to start: what it asks now would never be let go.
+        if (ext.stopped) {
+          say(name, "cannot hold the agent's memory: its server half is not running");
+          return;
+        }
+        // Let go when the half stops. What it says of itself is the extension's: one that fails, or does not answer true, holds nothing.
+        ext.stops.push(holdMemory(name, { label, rule, on: () => guarded(name, "saying whether it holds the agent's memory", () => holder.on()) === true }));
+      },
+    },
     router: ext.router,
     http: {
       json: express.json,
@@ -448,6 +489,7 @@ function portalFor(ext: Running): ServerPortal {
 
 async function stop(ext: Running): Promise<void> {
   running.delete(ext.half.name);
+  ext.stopped = true;
   for (const fn of ext.stops.reverse()) await guarded(ext.half.name, "stopping", () => within(STOP_MS, Promise.resolve().then(fn), "stopping"));
   ext.life.removeAllListeners();
 }
@@ -472,6 +514,7 @@ async function start(half: ServerHalf, sig: string, uses: Set<string>): Promise<
     say(half.name, "server half started");
     tellMissed(ext, since);
   } catch (e) {
+    ext.stopped = true;
     for (const fn of ext.stops.reverse()) await guarded(half.name, "stopping", () => within(STOP_MS, Promise.resolve().then(fn), "stopping"));
     failures.set(half.name, (e as Error)?.message || String(e));
     console.error(`[extension ${half.name}] its server half could not be started:`, e);
