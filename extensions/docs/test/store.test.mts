@@ -1135,7 +1135,7 @@ test('a store of an earlier version that cannot be written anew leaves the old o
   const before = snapshot(old);
   const docs = await portal({ a: folder }, { onStep: (step) => { if (step === 'move') throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' }); } });
   try {
-    const answered = await Promise.race([docs.call('GET', url), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))]);
+    const answered = await Promise.race([docs.call('GET', url), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000).unref())]);
     assert.ok(answered, 'answered, not waiting at the pipe');
     assert.equal(answered.status, 409, JSON.stringify(answered.body));
     assert.match(answered.body.error, /could not be moved into the portal's data folder \(pipe is a link or something that is not a file\)/);
@@ -1252,7 +1252,7 @@ test('git is never handed a document\'s path: a file swapped for a link when git
   const folder = folderWith('docs-store-swap-', { 'documents/plan.md': '# Plan\n\nWhat the agent wrote.\n' });
   const secretId = execFileSync('git', ['hash-object', path.join(secret, 'shadow')], { encoding: 'utf8' }).trim();
   // The agent, who owns the file, wins the race: the file is a link to what it may not read when git opens it.
-  const restore = wrappedGit('hash-object', `for f in ${JSON.stringify(path.join(folder, 'documents'))}/*.md; do rm -f "$f"; ln -s ${JSON.stringify(path.join(secret, 'shadow'))} "$f"; done`);
+  const restore = wrappedGit('fast-import', `for f in ${JSON.stringify(path.join(folder, 'documents'))}/*.md; do rm -f "$f"; ln -s ${JSON.stringify(path.join(secret, 'shadow'))} "$f"; done`);
   const docs = await portal({ a: folder });
   try {
     // Any request takes the file in; the file is a link by the time git runs, so it is no document to list any more.
@@ -1276,15 +1276,43 @@ test('a git run that hangs is stopped, and the folder goes on with the next requ
   const docs = await portal({ a: folder }, { gitTimeoutMs: 400 });
   try {
     const f = folderIdOf(folder);
-    const answered = await Promise.race([docs.call('POST', `/folders/${f}/documents`, { title: 'Plan', markdown: '# Plan\n' }), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))]);
+    const answered = await Promise.race([docs.call('POST', `/folders/${f}/documents`, { title: 'Plan', markdown: '# Plan\n' }), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000).unref())]);
     assert.ok(answered, 'answered before the hung git would have ended');
     assert.equal(answered.status, 500);
     rmSync(flag);
     // The queue moved on: the document written before git hung is taken in.
-    const listed = await Promise.race([docs.listed(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))]);
+    const listed = await Promise.race([docs.listed(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000).unref())]);
     assert.deepEqual(listed?.[0].documents.map((d: any) => d.name), ['plan.md']);
   } finally {
     restore();
+    await docs.close();
+  }
+});
+
+test('the documents a folder already has are taken in with one git run for their texts, not one each, and big ones a batch at a time', async () => {
+  // 20 MB of documents of nearly 1 MB each, more than one run takes, and small ones after them.
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 20; i++) files[`documents/big-${String(i).padStart(2, '0')}.md`] = `# Big ${i}\n\n${'x'.repeat(1_000_000)}\n`;
+  for (let i = 0; i < 50; i++) files[`documents/small-${String(i).padStart(2, '0')}.md`] = `# Small ${i}\n`;
+  const folder = folderWith('docs-store-batch-', files);
+  const runs = path.join(scratch('docs-store-batch-runs-'), 'runs');
+  writeFileSync(runs, '');
+  const restoreBatch = wrappedGit('fast-import', `echo fast-import >> ${JSON.stringify(runs)}`);
+  const restoreOne = wrappedGit('hash-object', `echo hash-object >> ${JSON.stringify(runs)}`);
+  const docs = await portal({ a: folder });
+  try {
+    const [listed] = await docs.listed();
+    assert.equal(listed.documents.length, 70);
+    assert.ok(listed.documents.every((d: any) => d.revision === 1));
+    // The first 17 MB in one run, the rest in another.
+    assert.deepEqual(readFileSync(runs, 'utf8').trim().split('\n'), ['fast-import', 'fast-import']);
+    // All of them in one commit, each with the text its file has: from the first run and from the second.
+    assert.equal(commits(folder), 1);
+    assert.equal(git(folder, 'ls-tree', '--name-only', 'HEAD').split('\n').length, 70);
+    for (const name of ['big-00.md', 'big-19.md', 'small-49.md']) assert.equal(git(folder, 'show', `HEAD:${name}`), readFileSync(path.join(folder, 'documents', name), 'utf8').trim(), name);
+  } finally {
+    restoreOne();
+    restoreBatch();
     await docs.close();
   }
 });
@@ -1330,7 +1358,7 @@ test('a link, or a pipe, in the store is refused when it is opened: git does not
     plant();
     const again = await portal({ a: folder });
     try {
-      const answered = await Promise.race([again.call('GET', url), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))]);
+      const answered = await Promise.race([again.call('GET', url), new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000).unref())]);
       assert.ok(answered, 'answered, not waiting at the pipe');
       assert.equal(answered.status, 409, JSON.stringify(answered.body));
       assert.match(answered.body.error, /not its own/);
