@@ -12,6 +12,7 @@ import { HEARTBEAT_ROLE } from "./pi/heartbeat-names.js";
 import path from "node:path";
 import type { Draft, PiClient, PiTool, PromptTaken } from "./pi/types.js";
 import { effectiveOff, exceptionsFor, heldOffUnshown, toolEnabled, toolSource } from "./tool-policy.js";
+import { scriptedMark } from "./tool-layers.js";
 import { unlisted } from "./mcp-offer.js";
 import { projectOf } from "./workspaces.js";
 import { findServerBuiltin, picturesRefused, runBuiltin } from "./pi/builtins.js";
@@ -1197,6 +1198,13 @@ class SessionManager extends EventEmitter {
       role: session.role,
       ...this.toolsFor(sessionId),
       codemode: modeOf(session.mode)?.codemode ? "only" : undefined,
+      // The instructions of a mode the person made, read each time pi builds the prompt (as it starts, reloads or is
+      // told its tools): an edit reaches the chats in the mode with the push that follows it (applyToolDefaults), and
+      // a mode that was deleted says nothing.
+      modeLines: () => {
+        const mode = modeOf(getSession(sessionId)?.mode);
+        return mode?.instructions ? [mode.instructions] : [];
+      },
       subagentModel: () => sessionSubagentModel(sessionId) ?? undefined,
       // A chat that names no model is reopened on the model of its last answer,
       // and after a spoken turn on the voice model that would be the voice's.
@@ -2803,7 +2811,7 @@ class SessionManager extends EventEmitter {
           ...(held && name === CODEMODE_TOOL ? { byMode: true as const } : {}),
           defaultOn: !defaults.includes(name),
           // Not offered one by one but found through the `tools` tool, or an MCP server's through `mcp`: the page says so beside the switch.
-          ...(scripted && mark.mcp === undefined ? {} : mark),
+          ...scriptedMark(mark, scripted),
         };
       }),
       live: Boolean(listed.length),
@@ -2866,10 +2874,11 @@ class SessionManager extends EventEmitter {
    * would only mean anything to chats started afterwards.
    *
    * `layer` when it was one layer's exceptions that changed — a project's, an
-   * agent's, a routine's: only the chats under it are told, the others have
-   * nothing new to hear.
+   * agent's, a routine's, a mode's: only the chats under it are told, the others
+   * have nothing new to hear. A push builds the prompt again too (pi's
+   * `_setActiveTools`), so it carries a mode's new instructions as well.
    */
-  async applyToolDefaults(layer?: string | { project?: string; agent?: string; routine?: string }): Promise<number> {
+  async applyToolDefaults(layer?: string | { project?: string; agent?: string; routine?: string; mode?: string }): Promise<number> {
     const only = typeof layer === "string" ? { project: layer } : layer;
     // The agents' homes read once for all of them, not once for each chat.
     const homes = agentHomes();
@@ -2879,6 +2888,7 @@ class SessionManager extends EventEmitter {
       if (only.project !== undefined) return projectOf(session?.workspace) === only.project;
       if (only.agent !== undefined) return agentIdOf(session?.workspace, homes) === only.agent;
       if (only.routine !== undefined) return routineOf(session) === only.routine;
+      if (only.mode !== undefined) return session?.mode === only.mode;
       return true;
     });
     const view = mcpView();
