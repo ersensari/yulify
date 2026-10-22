@@ -109,24 +109,8 @@ test('Settings → Skills does not say there are none when the list could not be
   await failsThenRecovers(page, 'skills', ['/api/skills'], { shown: 'release-notes', gone: 'None yet.' });
 });
 
-test('Settings → Add-ons: each add-on says what it could not read, and reads it again', async ({ page }) => {
-  const { up, asked } = await portal(page, ['/api/features/subagent', '/api/features']);
-  await page.goto('/settings/add-ons');
-  const dialog = settingsDialog(page);
-  // Voice mode is set in Settings → Defaults: the tab opens on Subagents.
-  await expect(dialog.getByRole('tab', { name: 'Voice' })).toHaveCount(0);
-  await expect(dialog.getByRole('tab', { name: 'Subagents' })).toHaveAttribute('aria-selected', 'true');
-  await expect(dialog.getByRole('alert')).toContainText(FAILED);
-  up('/api/features/subagent');
-  await dialog.getByRole('button', { name: 'Try again' }).click();
-  await expect(dialog.getByRole('alert')).toHaveCount(0);
-
-  // The memory page asks for the features, which are still down: it says so as well.
-  await dialog.getByRole('tab', { name: 'Memory' }).click();
-  await expect(dialog.getByRole('alert')).toContainText(FAILED);
-  const before = asked.filter((p) => p === '/api/features').length;
-  await dialog.getByRole('button', { name: 'Try again' }).click();
-  await expect.poll(() => asked.filter((p) => p === '/api/features').length).toBeGreaterThan(before);
+test('Settings → Tools: the subagent tool says what it could not read, and reads it again', async ({ page }) => {
+  await failsThenRecovers(page, 'tools', ['/api/features/subagent'], { shown: 'Off: the agent has no subagent tool.' });
 });
 
 test('Settings → Defaults → Voice mode says what it could not read, and reads it again', async ({ page }) => {

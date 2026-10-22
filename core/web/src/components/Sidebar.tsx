@@ -11,7 +11,6 @@ import {
   LuPanelLeftOpen,
   LuClock,
   LuFolderKanban,
-  LuBrain,
   LuChevronRight,
   LuMessagesSquare,
   LuPlus,
@@ -57,7 +56,6 @@ export const Sidebar = memo(function Sidebar({
   executor,
   activeId,
   view,
-  hasMemory = false,
   places,
   onSelect,
   onNewChat,
@@ -74,8 +72,6 @@ export const Sidebar = memo(function Sidebar({
   activeId: string | null;
   /** Which top-level destination is showing, so the nav can mark it. */
   view: "chat" | Destination;
-  /** Understory is the agent's memory: its page is there to read. */
-  hasMemory?: boolean;
   /** Where Home and the projects are, to list the chats by folder: undefined until known, null if they could not be. */
   places?: Places | null;
   onSelect: (id: string) => void;
@@ -201,8 +197,6 @@ export const Sidebar = memo(function Sidebar({
     { to: "projects", icon: <LuFolderKanban />, label: t("Projects") },
     { to: "agents", icon: <LuBot />, label: t("Agents") },
     { to: "routines", icon: <LuClock />, label: t("Routines") },
-    // Hidden unless Understory holds the agent's memory: a dead link to a feature you did not set up is just clutter.
-    ...(hasMemory ? [{ to: "memory" as const, icon: <LuBrain />, label: t("Memory") }] : []),
   ];
   // Last of the destinations, after the extensions' group.
   const audit = { to: "audit" as const, icon: <LuShield />, label: t("Audit") };
@@ -390,7 +384,7 @@ const GroupLabel = ({ children }: { children: ReactNode }) => (
 );
 
 /** A page of the portal's, or one an extension brought: `x/<extension>/<page id>`. */
-type Destination = "sessions" | "projects" | "agents" | "routines" | "memory" | "audit" | `x/${string}`;
+type Destination = "sessions" | "projects" | "agents" | "routines" | "audit" | `x/${string}`;
 
 function RailButton({
   icon,

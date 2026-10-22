@@ -653,15 +653,217 @@ it again in the older version's Settings → Add-ons → Voice.
 **Which backup, and which steps.** The version that makes Understory an
 extension (schema 10) follows this one with no release between them, so a
 portal takes both in one start, from 8 to 10, and its backup is
-`portal-v8-….db`. With that backup, do these steps and Understory's together:
-before you stop the portal, remove Voice, Voice servers and Understory under
-Settings → Extensions (Docker stays); put the v8 backup back; move aside
-`handoff/voice-service`, `handoff/voice-addresses` and `handoff/understory`
-with their `.<name>.*` folders, and `extension-data/pithagoras-voice`,
-`pithagoras-voice-servers` and `pithagoras-understory`; then run the version
-before both. With a `portal-v9-….db`, which only a portal that ran this version
+`portal-v8-….db`. With that backup, do these steps and
+[Understory's](#going-back-to-a-version-before-understory-was-an-extension)
+together, with the commands at the end of that section: before you stop the
+portal, remove Voice, Voice servers and Understory under Settings → Extensions
+(Docker stays); put the v8 backup back; move aside `handoff/voice-service`,
+`handoff/voice-addresses` and `handoff/understory` with their `.<name>.*`
+folders, and `extension-data/pithagoras-voice`, `pithagoras-voice-servers` and
+`pithagoras-understory`; then run the version before both. With a `portal-v9-….db`, which only a portal that ran this version
 alone and stopped at 9 has, Understory's steps take it back to 9, and from there
 these take it to 8.
+
+## Understory is an extension
+
+Understory, the agent's memory, which the portal ran in the
+`pithagoras-understory` container and set up in Settings → Add-ons → Memory, is
+the `pithagoras-understory` extension now
+([Memory: Understory](/guide/features#memory-understory)), which runs its
+container through [Docker for extensions](/guide/docker), `pithagoras-docker`.
+Neither is installed by an upgrade, nor by a new portal: **a portal that used
+Understory keeps it by installing Understory** from Settings → Extensions →
+Discover → Comes with Pithagoras. The question before the install lists Docker,
+which Understory requires, and on yes installs it first. An Understory you run
+yourself needs the extension as well: it is what makes it the agent's memory.
+
+Until Understory is installed:
+
+- the agent's `understory` server stays in pi's `mcp.json`, with its token, so
+  the chats keep its tools while something answers at its address;
+- the chats read the agent's `MEMORY.md` again, as nothing holds the agent's
+  memory in its place;
+- the Memory page and the Memory tab of Settings → Add-ons are gone, and a
+  tidy-up at a set time is not started;
+- where Understory thinks with the chat's model, what it asks the model fails,
+  filing what the agent adds and tidying up among it: the portal's own route to
+  that model is gone.
+
+Nothing Understory kept is lost. Once it is installed, what the portal did does
+the same, under new names and addresses:
+
+- **Installing, starting, stopping and removing** Understory, the model that
+  keeps the memory and when it tidies up, and switching it on as the agent's
+  memory are its page in Settings, under **Extension settings → Memory**, at
+  `/settings/x/pithagoras-understory`, where **Settings → Add-ons → Memory**
+  was. The Add-ons tab is gone with it: **Subagents** is in **Settings → Tools**,
+  and voice mode's settings are at the end of **Settings → Defaults**.
+- **The Memory page** is in the sidebar's **Extensions** group, at
+  `/x/pithagoras-understory/memory`, with the same `?note=` and `?view=` as
+  before. A link to `/memory` no longer opens it.
+- **The routes moved:** what was `/api/features/understory…` and
+  `/api/memory/…` is now under `/api/x/pithagoras-understory/…`, the
+  `understory` of `GET /api/features` being `/state` and
+  `PUT /api/features/understory` `/use` (see
+  [Understory's routes](/reference/api#understory)). `GET /api/features` is
+  gone, and `GET /api/features/flags` no longer has `understory`. A script that
+  used the old addresses needs the new ones.
+- **The chat's model** is reached through a server the extension runs on the
+  portal's loopback, `127.0.0.1:3801` (`UNDERSTORY_LLM_PORT`), in place of the
+  portal's own `/understory-llm/v1` route, so it works while the portal serves
+  its own TLS as well.
+- **A project's switch** for the agent's memory is named for no extension over
+  the API: `GET` and `PUT /api/projects/:name/agent` read and change
+  `{ agent, memory }` and say `memoryAvailable` (they were `understory` and
+  `understoryAvailable`), `POST /api/projects` takes `memory`, and
+  `GET /api/projects` marks a project that does without it with `memoryOff`.
+- `UNDERSTORY_VOLUME`, `UNDERSTORY_PORT`, `MEMORY_UNDERSTORY_URL`,
+  `MEMORY_UNDERSTORY_AUTH_TOKEN`, `UNDERSTORY_LLM_HEADERS_TIMEOUT_MS` and
+  `UNDERSTORY_LLM_BODY_TIMEOUT_MS` keep their names and meaning; Understory reads
+  them now.
+
+**The container and the memory** stay where they are. `pithagoras-understory`
+restarts with Docker, so it keeps running through the upgrade, and its volume
+`pithagoras_understory-memory` is kept. Understory takes them over by their
+names each time it starts: the volume as it is, and the container where it
+carries the label the portal gave it (`pithagoras.addon=understory`). It ends
+any run of the portal's that was left going in it, and makes it again once, with
+its settings, its memory in the volume and its token: the portal made it to
+reach the chat's model at a route that is gone, and on the network of the
+portal's container as it was then. They are then listed under
+`pithagoras-understory` in Settings → Docker. Until Understory is installed,
+they belong to no extension, and Settings → Docker does not show them.
+
+**What the portal kept of Understory is handed over**, not lost. The first
+start after the upgrade, which raises the schema to 10, moves it out of the
+portal into `handoff/understory` in the data folder, a folder only the portal
+can read: `settings.json`, with its four settings as they were stored — the
+model that keeps the memory and when it tidies up (a key of your own among
+them), the token its container was made with, which the agent's MCP entry
+carries, the key it called the portal's model route with, and what the last pass
+came to. It then deletes `understory_config`, `understory_token`,
+`understory_llm_token` and `understory_last_dream` from its database. A start
+on which the hand-off cannot be finished keeps everything, says so in the log,
+and goes on with it on the next start. Understory takes the hand-off up when it
+starts: `extension-data/pithagoras-understory/settings.json` then holds each
+setting it did not have of its own, and the log says what it took up. With
+Understory not installed the hand-off waits, nothing of it lost, until it is.
+While a hand-off that could not be taken up waits for the next start, Understory
+leaves the container the portal made as it is, and its page refuses what would
+need the token in the hand-off: saving its settings, which makes the container
+again, and switching it on as the agent's memory.
+
+The same upgrade also:
+
+- **says which MCP servers are your own, where you had not.** The guard counted
+  what the `understory` server said as your own words, unmarked and unchecked,
+  while you had not said which servers are; now it counts only the ones said.
+  Where you had not, and Understory was in use (its settings were there, or an
+  `understory` server was in `mcp.json`), the upgrade says it for you, once:
+  `understory` is in the trusted MCP servers in **Settings → Guard**, where you
+  can take it out. A list you had made stays as it was. See
+  [Prompt injection](/guide/security#marking-untrusted-output).
+- **keeps each project's switch** for the agent's memory, under a name that is no
+  extension's (`memory_off` in place of `understory_off`).
+- **leaves the agent's MCP entry as it was:** the `understory` server in pi's
+  `mcp.json`, its tools' names (`understory_memory_*`), their switches, lazy
+  marks and the name given to their group are still the server's.
+
+### Going back to a version before Understory was an extension
+
+**Which backup.** No release came between schema 9 and 10, so a portal at
+version 8, or an older one, went to 10 in one start, and the backup the upgrade
+made in `backups/` is `portal-v8-….db`:
+
+- **With `portal-v8-….db`**, go back from both upgrades at once, to the version
+  before Voice was an extension. Before you stop the portal, remove Voice, Voice
+  servers and Understory under Settings → Extensions (Docker stays). Put the
+  backup in as under [Going back](#going-back). With the portal stopped, move
+  `handoff/voice-service`, `handoff/voice-addresses` and `handoff/understory`
+  aside, each with the `.<name>.*` folders beside it, and Voice's, Voice
+  servers' and Understory's folders in `extension-data/`, as at the end of this
+  section. Then run the older version. What both sections say of the containers,
+  and of what was changed after the upgrade, holds for it too.
+- **With `portal-v9-….db`**, from a portal that stopped at version 9 and went on
+  to 10 later, the steps of this section take it back to 9. From there, those of
+  [Going back to a version before Voice was an extension](#going-back-to-a-version-before-voice-was-an-extension)
+  take it to 8.
+
+Either backup has Understory's settings as they were, and each project's switch
+under its old name. Put it back as under [Going back](#going-back). Before you stop the
+portal, remove Understory under Settings → Extensions: the older version has no
+such extension (Docker stays). What was changed on Understory's page after the
+upgrade, and what a later pass came to, are in Understory's folder, not in the
+backup: set them again in the older version's Settings → Add-ons → Memory. The
+token is the same in both, so the agent's MCP entry needs nothing.
+
+The container needs one thing: Understory made it to reach the chat's model at
+its own server, which the older version does not run. Make it again from the
+older version's **Settings → Add-ons → Memory**: **Save and restart
+Understory** shows only once something in the form has changed, so choose the
+model it thinks with once more (its source, as it is chosen, is enough) and
+press it; the memory in its volume is kept. A container Understory made
+carries the portal's label as well, so the older version manages it by its
+name.
+
+Then take what is left of the hand-off, and Understory's folder, out of the way
+of a later upgrade. In the data folder, with the portal stopped:
+
+```sh
+cd /path/to/data
+rm -rf handoff/understory handoff/.understory.*
+mv extension-data/pithagoras-understory "backups/pithagoras-understory-$(date +%Y%m%d-%H%M%S)"
+```
+
+In a container, run the same with the portal container's own mounts:
+
+```sh
+docker stop pithagoras
+
+docker run --rm --volumes-from pithagoras alpine sh -c '
+cd /data
+rm -rf handoff/understory handoff/.understory.*
+mv extension-data/pithagoras-understory "backups/pithagoras-understory-$(date +%Y%m%d-%H%M%S)"'
+```
+
+Where Understory was never installed, the last `mv` says there is no such file,
+which does no harm. Left in place, `handoff/understory` would be taken by the
+next upgrade for one it had left already, and Understory's folder would keep its
+own settings over the ones changed in the older version. Delete the folder set
+aside in `backups/` once you are sure you do not want it.
+
+With `portal-v8-….db`, these take the place of the commands above: Voice's and
+Voice servers' hand-offs and folders go aside as well, all of them moved, none
+deleted. Voices added after the upgrade are only in Voice's folder
+(`voices/<id>.wav`, with their words in `voices.json`), and can be added again
+in the older version from there. In the data folder, with the portal stopped:
+
+```sh
+cd /path/to/data
+stamp=$(date +%Y%m%d-%H%M%S)
+mkdir -p "backups/handoff-$stamp"
+for d in handoff/voice-service handoff/.voice-service.* handoff/voice-addresses handoff/.voice-addresses.* \
+         handoff/understory handoff/.understory.* \
+         extension-data/pithagoras-voice extension-data/pithagoras-voice-servers extension-data/pithagoras-understory; do
+  if [ -e "$d" ]; then mv "$d" "backups/handoff-$stamp/"; fi
+done
+```
+
+In a container, run the same with the portal container's own mounts:
+
+```sh
+docker stop pithagoras
+
+docker run --rm --volumes-from pithagoras alpine sh -c '
+cd /data
+stamp=$(date +%Y%m%d-%H%M%S)
+mkdir -p "backups/handoff-$stamp"
+for d in handoff/voice-service handoff/.voice-service.* handoff/voice-addresses handoff/.voice-addresses.* \
+         handoff/understory handoff/.understory.* \
+         extension-data/pithagoras-voice extension-data/pithagoras-voice-servers extension-data/pithagoras-understory; do
+  if [ -e "$d" ]; then mv "$d" "backups/handoff-$stamp/"; fi
+done'
+```
 
 ## Upgrading from the first release
 
@@ -706,5 +908,6 @@ Run a release rather than `latest`, so that going back is changing one value. Ea
 Going back to a version from before Media was an extension also needs Media's files moved back, and what is left of its hand-off and its store out of the way, before step 3: see [Media is an extension](#going-back-to-a-version-before-it).
 Going back to a version from before Browser was an extension needs Browser removed first, and a local Chrome's profile moved back, and what is left of its hand-off and its folder out of the way, before step 3: see [Browser is an extension](#going-back-to-a-version-before-browser-was-an-extension).
 Going back to a version from before Voice's service was an extension needs Voice and Voice servers removed first, and what is left of their hand-offs and their folders moved aside, before step 3: see [Voice's service is an extension](#going-back-to-a-version-before-voice-was-an-extension).
+Going back to a version from before Understory was an extension needs Understory removed first, and what is left of its hand-off and its folder out of the way, before step 3, and its container made again from the older version afterwards: see [Understory is an extension](#going-back-to-a-version-before-understory-was-an-extension).
 
 From this version on, an older version does not start on a newer database: it stops at the page described above, because a newer version may have renamed or dropped columns, not only added them. Versions before this one open it anyway and run against it, so put the backup back before you start one of them. The backup from `backups/` is the database as it was before the newer version changed it, which is why going back means putting it back.
