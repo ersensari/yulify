@@ -1,5 +1,5 @@
 import express, { type Router } from "express";
-import { CORE_MODES, CUSTOM, STANDARD, type ChatModeEntry } from "../chat-modes.js";
+import { CORE_MODES, CUSTOM, providedModes, STANDARD, type ChatModeEntry } from "../chat-modes.js";
 import {
   chatSaid,
   createCustomMode,
@@ -11,6 +11,7 @@ import {
   getSession,
   modeOf,
   onChannel,
+  recordAudit,
   setCustomModeTools,
   toolDefaultsOff,
   updateCustomMode,
@@ -30,10 +31,12 @@ import { CODEMODE_TOOL } from "../pi/codemode.js";
  * The modes a chat may be put in: none where it may not choose. A chat with the person on the portal's pages (a task
  * chat or an Agent-page chat, of the primary user: see asksQuestions), where pi runs in the portal's own process: a
  * mode is carried out where the portal starts a chat's pi, which a container's pi is not. The portal's own first,
- * then the ones the person made, by their names.
+ * then the ones the person made, by their names, then the extensions' in the order they were offered.
  */
 export function modesFor(session: SessionRow): readonly ChatModeEntry[] {
-  return EXECUTOR_KIND === "host" && asksQuestions(session, onChannel(session)) ? [...CORE_MODES, ...customModes().map(customEntry)] : [];
+  return EXECUTOR_KIND === "host" && asksQuestions(session, onChannel(session))
+    ? [...CORE_MODES, ...customModes().map(customEntry), ...providedModes()]
+    : [];
 }
 
 const STARTED = "This chat has started, and its mode is fixed: start a new chat for another one.";
@@ -49,7 +52,9 @@ export function modesRouter(): Router {
   router.get("/sessions/:id/modes", (req, res) => {
     const session = getSession(req.params.id);
     if (!session) return res.status(404).json({ error: "Not found" });
-    res.json({ modes: modesFor(session).map(({ id, label, description }) => ({ id, label, description })) });
+    res.json({
+      modes: modesFor(session).map(({ id, label, description, confirm, extension }) => ({ id, label, description, ...(confirm ? { confirm } : {}), ...(extension ? { extension } : {}) })),
+    });
   });
 
   /** Puts a chat that has said nothing yet in a mode; its pi, where one is up, is let go, to start again in it. */
@@ -64,6 +69,10 @@ export function modesRouter(): Router {
     const mode = req.body?.mode;
     const entry = offered.find((one) => one.id === mode);
     if (!entry) return res.status(400).json({ error: `There is no mode "${String(mode)}" for this chat.` });
+    // A mode that asks first is put only where the caller says the person said yes to its text.
+    if (entry.confirm && req.body?.confirmed !== true) {
+      return res.status(409).json({ error: "This mode asks first: send confirmed: true once the person has said yes to its text.", confirm: entry.confirm });
+    }
     try {
       const done = await sessions.stopUnstarted(session.id, () => {
         // What the mode starts its chats on is written into the chat; leaving a mode for another before the chat has
@@ -82,6 +91,7 @@ export function modesRouter(): Router {
       if (e instanceof SessionEditError) return res.status(409).json({ error: e.message });
       return res.status(500).json({ error: (e as Error).message });
     }
+    if (entry.confirm) recordAudit({ kind: "mode", subject: entry.label, reason: entry.id, sessionId: session.id });
     res.json({ mode: entry.id });
   });
 

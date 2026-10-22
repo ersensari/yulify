@@ -113,6 +113,15 @@ checked. Choose before the first message: from then on the chat keeps it.
   its switch cannot turn it off, with a line that says why: to work without the
   code tool, start a chat in Standard mode. The other switches work as in any
   chat.
+- **An extension's modes** come last, after the portal's own and
+  [yours](#modes-you-make): an installed extension can offer modes of its own,
+  and what such a mode does is the extension's
+  ([Chat modes](/guide/extension-ui#chat-modes)). One that asks first is shown
+  in the warning colour, and is chosen only after you say yes to its warning,
+  which [Audit](#audit) keeps as *Mode chosen*. A chat in the mode of an
+  extension that is switched off or removed keeps its mode, shown as not
+  available, and works without what the extension gave it until the extension
+  is back.
 
 The mode is fixed once the chat has said something: its first message, or a
 command sent to pi. Leaving a mode means starting a new chat; `/new` and
@@ -654,6 +663,7 @@ and, for a tool, which tool and what it was asked to do:
 | `allowed-by-exemption` | A routine [let off a rule](/guide/routines#the-injection-guard) did something that rule would have stopped |
 | `revoked` | An approval not yet spent was taken back in Settings → Guard |
 | `untrusted` | A flagged result you had trusted was untrusted in Settings → Guard, and holds its chat back again |
+| Mode chosen | A chat was put in an extension's [mode that asks first](#modes), after you said yes to its warning: the mode's name, and what the chat stores |
 | Log cleared | Somebody emptied the log, and how many entries went |
 
 The buttons above the list filter it: **Everything**, **Refused**, **Allowed**
