@@ -91,8 +91,9 @@ While you work on it:
 | The pi extension | Install the folder again by its path, or `/reload` in one chat |
 
 pi installs a folder by reference, so installing it again copies nothing: it
-starts the server half again where its module changed, and reloads the open
-chats, a chat that is working at its next step (see
+starts the server half again where its module changed, swaps the browser half
+into every open page where its module or its stylesheet changed, and reloads
+the open chats, a chat that is working at its next step (see
 [a chat that is working](/guide/extensions#a-chat-that-is-working)). What a
 chat could not load, such as a factory of `chats.extend` that throws, is said
 in that chat.
@@ -1969,11 +1970,28 @@ each a whole theme in the one `package.json`.
 
 The portal loads the browser half, the server half and the themes of every
 package that is installed in the portal and switched on. Installing, removing, updating or
-switching one takes effect in the open page and in the server, without a
-reload or a restart. The open chats are loaded again with it, for their pi to
-have the package's pi extension and what its server half adds as they are now:
-an idle chat at once, and one that is working at its next step, between two
-requests of its run (see
+switching one takes effect in the server and in every open page, without a
+reload or a restart: at once in the page it was done from, and within five
+seconds in the others, wherever it was done (another tab, the API, an agent).
+Every page asks for the list of chats every five seconds, and is told with it a
+revision of what is installed: of every package, one that brings nothing to the
+page included (a pi half, skills, prompts). When that is not the revision the
+page last went through, the page goes through what is installed again, and
+Settings → Extensions lists it again.
+
+A browser half is fetched under its revision, which changes with its module's
+file and its stylesheet's: installing a package again from its folder after you
+changed either swaps the new one into every page, in place. Every file the
+module imports by a relative address is fetched under the same revision, so the
+new one comes with the files of its own revision, not with those the page had.
+A change to such a file alone is not another revision: change the module too,
+or build it again; [`buildExtension`](#writing-it-in-typescript) writes the
+module on every build.
+
+Installing, removing, updating or switching a package also loads the open chats
+again, for their pi to have the package's pi extension and what its server half
+adds as they are now: an idle chat at once, and one that is working at its next
+step, between two requests of its run (see
 [a chat that is working](/guide/extensions#a-chat-that-is-working)). So does
 saving pi's `settings.json` in Settings → **Advanced**.
 
@@ -2005,6 +2023,25 @@ again the next time a package changes, and the themes its `package.json` names
 are there to choose all the while. A component that fails to draw takes down its own panel or
 page, and a server half's handler that throws is answered as an error; the
 rest of the portal goes on.
+
+A page tells the portal when a browser half fails there, with the revision that
+failed and where it failed (`POST /api/extension-ui/failures`): when it fails to
+load or to draw, when a handler of its throws (what its server half or its
+extension in a chat said to it, a shortcut), and when something it runs of its
+own throws and nothing catches it (a timer, a promise, a click handler), told
+apart by the address its files come from. Each failure is told once per page.
+The portal keeps the latest for each package until another revision of it is
+installed, and says it with the package (`clientError` and `clientStack` in
+`GET /api/extension-ui`). Settings → Extensions shows it beside the package in
+the page it failed in at once, and in any other page that goes through what is
+installed after that: one opened or reloaded later, and every open page once
+what is installed next changes.
+
+A browser half that breaks the whole page, or keeps it from answering, can be
+switched off all the same: open the portal with `?extensions=off` on its address
+(`/settings/extensions?extensions=off`). That page loads no browser half, and
+Settings → Extensions lists every package, with its switch and Remove. An
+extension's own page opened that way says so.
 
 ### The extensions a portal starts with
 
