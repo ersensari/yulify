@@ -77,7 +77,7 @@ import { memoryHolder } from "./memory-holder.js";
 import { heartbeat } from "./heartbeat.js";
 import { deleteNotesOf } from "./activity.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
-import { sessions, CommandFailed, IMAGE_ROOT } from "./session-manager.js";
+import { sessions, CodemodeHeld, CommandFailed, IMAGE_ROOT } from "./session-manager.js";
 import { ImageError, MAX_IMAGE_BYTES, MAX_IMAGES, imagePath, mimeOf, parseImages, saveImages } from "./prompt-images.js";
 import { defaultsFor, exceptionsFor, heldOffUnshown, toolEnabled, toolSource } from "./tool-policy.js";
 import { mcpRouter, mcpServerNames, onMcpWritten } from "./api/mcp.js";
@@ -96,6 +96,7 @@ import { filesRouter } from "./api/files.js";
 import { holdsWork, unsavedRefusal, unsavedWork } from "./git.js";
 import { skillsRouter } from "./api/skills.js";
 import { featuresRouter } from "./api/features.js";
+import { modesRouter } from "./api/modes.js";
 import { modelLevels, modelRuntime, providersRouter } from "./api/providers.js";
 import { peopleRouter } from "./api/people.js";
 import { voiceRouter } from "./api/voice.js";
@@ -1268,7 +1269,12 @@ app.put("/api/sessions/:id/tools", async (req, res) => {
   if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   const off = req.body?.off;
   if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
-  res.json({ off: await sessions.setTools(session.id, off) });
+  try {
+    res.json({ off: await sessions.setTools(session.id, off) });
+  } catch (e) {
+    if (e instanceof CodemodeHeld) return res.status(409).json({ error: e.message, code: e.code });
+    throw e;
+  }
 });
 
 /**
@@ -1727,6 +1733,7 @@ app.get("/api/sessions/:id/commands", async (req, res) => {
 app.use("/api", packagesRouter());
 app.use("/api", extensionsRouter());
 app.use("/api", featuresRouter());
+app.use("/api", modesRouter());
 app.use("/api", channelsRouter());
 app.use("/api", agentsRouter());
 app.use("/api", routinesRouter());

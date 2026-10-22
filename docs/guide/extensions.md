@@ -301,6 +301,15 @@ lazy: the model is not offered the one, and the other is how it makes many
 calls in one. Code mode is offered in chats that run on the host; the
 container executor has no tool switches.
 
+Code mode is also a [chat mode](/guide/sessions#modes), chosen above the
+message box before a chat's first message. The mode switches `codemode` on as
+a layer of its own, above the chat's agent and project, where the chat's own
+switch cannot turn it off, and has pi hide the other tools' declarations (its
+`only` presentation), so the model works through the code tool alone. The switch
+alone, in a chat in Standard mode, keeps pi's own setting for that, which is
+`on` unless pi's `settings.json` says otherwise: the code tool beside the
+others.
+
 Before a chat has started, and in Settings → Tools, the list is what the portal
 has seen registered. The tools of a package that is switched off, narrowed to
 none of its extensions, or uninstalled are left out of it, since nothing
@@ -389,8 +398,10 @@ the tool one by one again. The button of a tool that is switched off by default 
 group's while every tool in it is off: a tool that is off is not offered to the model, lazy or not, so
 a mark on it changes nothing in the chats where it stays off. The mark is the portal's and not one of an
 agent's, project's, routine's or chat's, so where one of those switches the tool on, the mark still
-applies. To set or take away such a mark, switch the tool on by default for a moment. A mark that was
-set stays as it is.
+applies. In a chat in Code mode the marks do not apply: every tool that is on is in a script's reach,
+found with `searchTools`, and the `tools` tool is not offered. An MCP server's tools still stay behind
+`mcp`, which a script calls like any other tool (see [Modes](/guide/sessions#modes)). To set or take
+away such a mark, switch the tool on by default for a moment. A mark that was set stays as it is.
 
 Any tool can be made lazy except pi's own built-in ones (`read`, `bash`, `edit`, `write`, `grep`, `find`
 and `ls`), which every conversation works with and which are always offered. They have no lazy button, and

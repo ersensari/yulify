@@ -57,6 +57,8 @@ them. See [Projects](/guide/projects).
 | `POST /api/sessions` | `{ workspace?, agent?, title? }` — `agent` starts it in that agent's home; neither means the agent picked for new chats, the first agent (Home) by default; no title means "New chat", replaced by the first message |
 | `GET /api/sessions/:id` | One session |
 | `PATCH /api/sessions/:id` | `{ title?, pinned? }` — a title is cut to 120 characters |
+| `GET /api/sessions/:id/modes` | `{ modes: [{ id, label, description }] }` — the [modes](/guide/sessions#modes) the chat may be put in, Standard first, whether or not it has started; none for a routine's run, a heartbeat, a chat that came through a channel, a colleague's chat, or any chat with `EXECUTOR=container`. Does not start pi |
+| `PUT /api/sessions/:id/modes` | `{ mode }` — puts a chat that has said nothing yet in a mode, by its `id`; a pi that was started for it is let go, and the next message starts it in the mode. Answers `{ mode }`. 409 where the chat is offered no modes, once it has sent a message or a command, or while it is running; 409 `This conversation is already being edited.` while an edit or a reload holds it; 400 for a mode it is not offered |
 | `DELETE /api/sessions/:id` | Stops it if running, then deletes it, its events and pi's conversation file for it (in `SESSION_DIR`). The folder it worked in is left alone. |
 
 A session:
@@ -72,13 +74,15 @@ A session:
   "live": true,
   "created_at": "…",
   "updated_at": "…",
-  "last_error": null
+  "last_error": null,
+  "mode": null
 }
 ```
 
 `status` is one of `idle`, `running`, `error`, `interrupted`. `live` is whether
 a pi process is up right now, which is not the same thing — an idle session can
-still be live.
+still be live. `mode` is the [mode](/guide/sessions#modes) the chat was started
+in: `null` for Standard, the portal's own by its name (`"code"`).
 
 ## Files
 
@@ -110,8 +114,8 @@ these routes answers `{ error, code }`.
 | `PUT /api/ask-question` | `{ waitMinutes }` — how long a question from the agent's `ask_question` waits for an answer: `0` (until it is answered, the default), `5`, `15`, `30` or `60`; anything else is a 400. The tool is offered wherever a person answers in the web UI (a chat, a conversation on the Agent page), not in a routine, a heartbeat or a chat reached through a channel. Read when a question is asked, so it applies to the next one |
 | `PUT /api/tools` | `{ off: string[] }` — the default for every conversation; applied to the running ones too. A [project](#projects) can bend it with `PUT /api/projects/:name/tools`, and a conversation then holds its exceptions against that |
 | `PUT /api/tools/lazy` | `{ lazy: string[] }` — the lazy marks: tool sets, named as the tools list names its boxes (a package, such as `pithagoras-media` for Media's picture and video tools, or `pithagoras-browser` for the browser's), and single tools as `<tool>name`. Answers `{ lazy, applied }`. Marking switches nothing: the tools stay on or off as they are, and a running conversation stops offering the lazy ones that are on one by one. A mark that names an MCP server's tools (they are lazy by their server's setting) or pi's built-in tools (the `built in` group) is refused with 400 and `code: "lazy-refused"`, and nothing is stored |
-| `GET /api/sessions/:id/tools` | `{ tools, live, off }` — every tool the conversation could use and whether it is on. `live` is false when pi is not running to be asked. A [lazy](/guide/extensions#lazy-tools) tool (not offered one by one, reached through the `tools` tool) carries `lazy: true` whether it is on or off here; off, it is not reachable. The project and routine tool lists mark it the same |
-| `PUT /api/sessions/:id/tools` | `{ off: string[] }` — switch tools off by name; everything not named is on |
+| `GET /api/sessions/:id/tools` | `{ tools, live, off }` — every tool the conversation could use and whether it is on. `live` is false when pi is not running to be asked. A [lazy](/guide/extensions#lazy-tools) tool (not offered one by one, reached through the `tools` tool) carries `lazy: true` whether it is on or off here; off, it is not reachable. The project and routine tool lists mark it the same. In a chat whose [mode](/guide/sessions#modes) switches `codemode` on, `codemode` carries `byMode: true` while it is on: its switch cannot turn it off |
+| `PUT /api/sessions/:id/tools` | `{ off: string[] }` — switch tools off by name; everything not named is on. 409 with `code: "codemode-held"`, and nothing written, for a list that turns `codemode` off in a chat whose mode switches it on |
 | `GET /api/tool-names` | What each package is called here; everything unnamed keeps its own name |
 | `PUT /api/tool-names` | `{ names }` — a name per package, MCP server or `built in`. An empty one removes it |
 

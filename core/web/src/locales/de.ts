@@ -1018,6 +1018,14 @@ const de: Locale = {
     // components/Modal.tsx
     "Close": "Schließen",
     "What you changed here has not been saved.": "Was du hier geändert hast, ist nicht gespeichert.",
+    // components/ModePicker.tsx
+    "Standard mode": "Standardmodus",
+    "The agent as this chat would have it anyway: the tools that Settings → Tools, its agent and its project switch on.": "Der Agent, wie dieser Chat ihn ohnehin hätte: mit den Tools, die Einstellungen → Tools, sein Agent und sein Projekt einschalten.",
+    "The model works through one tool: it writes a short JavaScript script that calls the chat's tools, and is given only what the script puts out.": "Das Modell arbeitet über ein einziges Tool: Es schreibt ein kurzes JavaScript-Skript, das die Tools des Chats aufruft, und bekommt nur, was das Skript ausgibt.",
+    "Mode: {mode}": "Modus: {mode}",
+    "Modes": "Modi",
+    "How this chat works. It is fixed once the chat has started.": "Wie dieser Chat arbeitet. Das steht fest, sobald der Chat begonnen hat.",
+    "{mode} is not available now": "{mode} ist gerade nicht verfügbar",
     // components/PackageCatalog.tsx
     "Install {name}?": "{name} installieren?",
     "It is installed from npm and runs inside pi with the same rights as the agent — reading files, running commands. Install packages you trust.": "Es wird von npm installiert und läuft in pi mit denselben Rechten wie der Agent — liest Dateien, führt Befehle aus. Installiere nur Pakete, denen du vertraust.",
@@ -1800,6 +1808,7 @@ const de: Locale = {
     "{n} files": { one: "{n} Datei", other: "{n} Dateien" },
     "{n} entries": { one: "{n} Eintrag", other: "{n} Einträge" },
     // tool-groups.ts
+    "This chat's mode works through the code tool, so it stays on: start a chat in Standard mode to work without it.": "Der Modus dieses Chats arbeitet über das Code-Tool, daher bleibt es an: Starte einen Chat im Standardmodus, um ohne es zu arbeiten.",
     "built in": "eingebaut",
     "{n} off": { one: "{n} aus", other: "{n} aus" },
     "{off} of {n} off": { one: "{off} von {n} aus", other: "{off} von {n} aus" },
