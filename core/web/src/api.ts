@@ -317,7 +317,8 @@ export interface PortalEvent {
  * Fired when what is installed changed (a package installed, removed, updated
  * or switched), so the page loads or drops an extension's interface at once:
  * see extensions/loader.ts. By this page's own changes as they are made, and by
- * the list of chats when it says that what is installed changed elsewhere.
+ * the list of chats when it says that what is installed changed elsewhere, or
+ * where a server half stands: one may have crashed.
  */
 export const EXTENSIONS_CHANGED = "pithagoras:extensions-changed";
 const changesExtensions = <T>(request: Promise<T>): Promise<T> =>
@@ -325,6 +326,16 @@ const changesExtensions = <T>(request: Promise<T>): Promise<T> =>
     window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
     return result;
   });
+
+/** How a server half crashed, with the lines it said last, as a log file has them: as GET /api/extension-ui gives it. */
+export interface ServerCrash {
+  name: string;
+  at: string;
+  rev: string;
+  error: string;
+  stack?: string;
+  lines: string[];
+}
 
 /** An installed extension's browser half: where its module is fetched from, and its stylesheet if it has one. */
 export interface ExtensionUi {
@@ -344,6 +355,12 @@ export interface ExtensionUi {
   /** Where its server half's own routes are, when it has one; why it is not running, when it could not be started. */
   server?: string;
   serverError?: string;
+  /**
+   * Its server half crashed (an error of its code reached the portal's process, or it called process.exit()), and is
+   * off until another revision of it is installed or it is switched off and on: when, which revision, the error, and
+   * the last lines it said, as a log file has them.
+   */
+  crash?: ServerCrash;
   /** The extensions its server half cannot start without, each with the versions it takes. */
   requires?: Record<string, string>;
   /** The themes its package.json names: colours in place of the portal's own, with no code. See extensions/themes.ts. */
@@ -521,7 +538,7 @@ export const api = {
       body: JSON.stringify({ current, settings, only }),
     }),
   workspaces: () => json<{ root: string; workspaces: Workspace[] }>("/api/workspaces"),
-  /** With what is installed, as a revision that changes whenever it does: see EXTENSIONS_CHANGED. */
+  /** With what is installed and where its server halves stand, as a revision that changes whenever either does: see EXTENSIONS_CHANGED. */
   sessions: () => json<{ sessions: Session[]; executor: string; extensions: string }>("/api/sessions"),
   /** Without a workspace the chat starts in the home of the agent New is set to. */
   createSession: (workspace?: string, title?: string) =>

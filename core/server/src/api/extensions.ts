@@ -12,7 +12,8 @@ import { clientHalf, packageKinds, requiresOf, staticImports, packageThemes, ser
 import { sendCompressed } from "../compressed-file.js";
 import { bundledPath } from "../bundled.js";
 import { SUBAGENT_PACKAGE } from "../features.js";
-import { isServing, serverFailure, serversSettled, syncServerHalves } from "../extension-host.js";
+import { isServing, serverFailure, serverHalfStatus, serverHalvesStanding, serversSettled, syncServerHalves } from "../extension-host.js";
+import { logFileLine } from "../logs.js";
 import { planInstall, type InstalledExtension } from "../install-plan.js";
 
 const run = promisify(execFile);
@@ -356,14 +357,21 @@ async function installedExtensions(): Promise<InstalledExtension[]> {
   return out;
 }
 
+const digest = (of: unknown): string => createHash("sha256").update(JSON.stringify(of)).digest("base64url").slice(0, 16);
+
 /**
- * What is installed, as the last sync found it: the packages pi's settings list, with what is switched on of each; the
- * halves and themes of them the pages load; and where each server half stands, as a digest. Every page asks for it
- * with the list of chats (`GET /api/sessions`) and goes through what is installed again when it changes, so that an
- * install made anywhere else (another tab, the API, an agent) reaches it, Settings → Extensions included.
+ * What is installed, as the last sync found it: the packages pi's settings list, with what is switched on of each, and
+ * the halves and themes of them the pages load, as a digest. None until the portal has gone through it once.
  */
-let revision = "";
-export const extensionsRevision = (): string => revision;
+let installed = "";
+
+/**
+ * What is installed, and where each server half stands, as a digest. Every page asks for it with the list of chats
+ * (`GET /api/sessions`) and goes through what is installed again when it changes, so that an install made anywhere
+ * else (another tab, the API, an agent) reaches it, Settings → Extensions included; and so does a server half's crash,
+ * though nothing was installed (see serverHalvesStanding).
+ */
+export const extensionsRevision = (): string => installed && digest([installed, serverHalvesStanding()]);
 
 /**
  * Bring the server halves that run in line with what is installed and switched
@@ -373,9 +381,8 @@ export const extensionsRevision = (): string => revision;
 export async function syncExtensionServers(): Promise<void> {
   const found = await halves();
   await syncServerHalves(found.servers);
-  const standing = found.servers.map((half) => [isServing(half.name), serverFailure(half.name) ?? null]);
   // The packages too: one with nothing for the pages (a pi half, skills, prompts) is still listed in Settings.
-  revision = createHash("sha256").update(JSON.stringify([readPiSettings().packages ?? null, found, standing])).digest("base64url").slice(0, 16);
+  installed = digest([readPiSettings().packages ?? null, found]);
 }
 
 /**
@@ -421,6 +428,9 @@ function importUrl(half: ClientHalf, file: string): string | undefined {
 /** What a page asks for ahead with the module of `half`. */
 const preloadOf = (half: ClientHalf): string[] => staticImports(half).map((file) => importUrl(half, file)).filter((url) => url !== undefined);
 
+/** How many of the lines a crashed server half said last are listed with its crash. */
+const CRASH_LINES = 30;
+
 /**
  * Why a browser half failed in a page, as the page said: to load, to draw, or in what it runs of its own there. The
  * latest, by the package's name, with the revision that failed and where it failed, as the page had it.
@@ -455,6 +465,8 @@ export function extensionsRouter(): Router {
           const themes = themed.find((half) => half.name === name);
           const failure = server && serverFailure(name);
           const failed = client && clientFailure(client);
+          // The crash its server half is held off for, with what it said last.
+          const status = server && serverHalfStatus(name);
           return {
             name,
             version: (client ?? server ?? themes)!.version,
@@ -469,6 +481,7 @@ export function extensionsRouter(): Router {
             // What its server half cannot start without.
             ...(server?.requires ? { requires: server.requires } : {}),
             ...(failure ? { serverError: failure } : {}),
+            ...(status && status.crash ? { crash: { ...status.crash, lines: status.lines.slice(-CRASH_LINES).map(logFileLine) } } : {}),
             // Why its browser half failed in a page, and where, as that page said.
             ...(failed ? { clientError: failed.error } : {}),
             ...(failed?.stack ? { clientStack: failed.stack } : {}),

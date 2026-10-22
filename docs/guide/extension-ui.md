@@ -770,7 +770,10 @@ module (`"type": "module"` in `package.json`, or a `.mjs` file).
 
 It has fifteen seconds to start and five to stop; one that takes longer is
 given up on, with the reason beside the package in Settings → Extensions, and
-nothing else waits for it. The module itself is read again each time it is
+nothing else waits for it. One that crashes, an error of its code that nothing
+catches or a call of `process.exit()`, is stopped and held off, and the portal
+and its chats go on: see [When the server half crashes](#when-the-server-half-crashes).
+The module itself is read again each time it is
 started. What it imports from its own package is read once for as long as the
 portal runs, as Node reads modules: after an update that changes those files,
 restart the portal.
@@ -1975,9 +1978,11 @@ reload or a restart: at once in the page it was done from, and within five
 seconds in the others, wherever it was done (another tab, the API, an agent).
 Every page asks for the list of chats every five seconds, and is told with it a
 revision of what is installed: of every package, one that brings nothing to the
-page included (a pi half, skills, prompts). When that is not the revision the
-page last went through, the page goes through what is installed again, and
-Settings → Extensions lists it again.
+page included (a pi half, skills, prompts), and of where each server half
+stands, so that a crash reaches every open page too
+([When the server half crashes](#when-the-server-half-crashes)). When that is
+not the revision the page last went through, the page goes through what is
+installed again, and Settings → Extensions lists it again.
 
 A browser half is fetched under its revision, which changes with its module's
 file and its stylesheet's: installing a package again from its folder after you
@@ -2022,7 +2027,8 @@ called, and the others do not wait for one that takes longer. It is tried
 again the next time a package changes, and the themes its `package.json` names
 are there to choose all the while. A component that fails to draw takes down its own panel or
 page, and a server half's handler that throws is answered as an error; the
-rest of the portal goes on.
+rest of the portal goes on. A server half that crashes is stopped and held off
+([When the server half crashes](#when-the-server-half-crashes)).
 
 A page tells the portal when a browser half fails there, with the revision that
 failed and where it failed (`POST /api/extension-ui/failures`): when it fails to
@@ -2145,6 +2151,70 @@ each of them takes from the portal, and what gives the same to an extension:
 | Letting go of what it kept for a chat when a routine's run is over | `chats.on("finished")` |
 | A slash command | `pi.registerCommand` in the pi extension, and the channel for what it does in the page |
 | The colours of everything | [A theme](#themes) |
+
+## Troubleshooting
+
+### When the server half crashes
+
+A server half runs in the portal's own process, so an error its code throws
+where nothing catches it (in a timer, a callback, a socket's event), a promise
+of its own that rejects with nobody to hear it, and a call of `process.exit()`
+would end the portal. They do not: each is that extension's crash.
+
+- The portal and its chats go on. The half is stopped, and so are the halves
+  that require it (`pithagoras.requires`); those that only use it where it is
+  there (`optional`) start again without it.
+- It stays off while the files are the ones that crashed: until another
+  version of it is installed (its server module changed), or it is switched
+  off and on in Settings → Extensions. A restart of the portal starts it again
+  as well.
+- A tool of its that a chat had called, and that had not answered yet, answers
+  at once with an error that names the crash and carries the half's last
+  lines, so the agent reads what happened in the same turn and the chat goes
+  on; so does one of its handlers in a chat's pi (`pi.on`) that had not
+  returned. A later call of that tool or of its commands, in a chat that still
+  has them, answers the same without running its code, and its handlers are
+  no longer called; a chat that loads after the crash has none of them.
+- A request to its routes that had not been answered is answered with
+  `503` and the crash; one whose answer had begun is cut off.
+- Settings → Extensions shows the crash beside the package, with what the
+  half said last, in every open page within five seconds, as it shows an
+  install ([What is loaded, and when](#what-is-loaded-and-when)); a page
+  opened with `?extensions=off` reads nothing of the extensions' halves and
+  does not show it. `GET /api/extension-ui` has it as `crash`, and Settings →
+  Logs has every line.
+
+What the half said is kept for it, the latest 200 lines: what it writes with
+`portal.log`, the portal's own lines about it, and whatever is printed while
+its code runs.
+
+The portal knows the code as the extension's while it runs the module as it
+starts, its routes and what their request, answer and upgraded socket tell it
+later, its handlers (`chats.on`, `chats.onEvent`, `chats.onOpen`, upgrades,
+and the rest it registers), and what it adds to a chat's pi: its tools'
+calls, its handlers and its commands. So it knows what that code starts: its
+timers, promises, callbacks, sockets and processes. What the portal does that
+the half asks for is the portal's own: a chat told or reloaded, a chat's
+model, a request its routes hand on, a turn it asks a chat's pi for
+(`pi.sendMessage`, `pi.sendUserMessage`). An error from a listener it put on
+something it does not own (`process.on(...)`, an emitter of another's), or
+from a `queueMicrotask` callback, is known by its stack, which goes through
+the folder of the server module: any file in that folder counts, a pi
+extension (`pi.extensions`) kept there as well, whose uncaught error is then
+counted as the server half's crash. An error that is no extension's ends the
+portal, as it always has, and so does one of a pi extension kept elsewhere.
+
+What this cannot stop:
+
+- Code that never yields, a loop or a long synchronous call, holds the whole
+  portal, and code that takes all the memory ends it: both run in the
+  portal's own process, and a restart starts the half again. Remove the
+  package with `pi remove <spec>` where the portal runs (in its container),
+  then restart it.
+- A timer or a process the half left behind, as it crashed or as it was
+  stopped, goes on until the portal restarts. Each of its errors is said in
+  the log, and nothing more is done. One known only by its stack is counted
+  as the running half's of that folder, where there is one.
 
 ## The example
 

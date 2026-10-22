@@ -2,7 +2,7 @@ import * as React from "react";
 import { createContext, useContext, useSyncExternalStore } from "react";
 import * as ReactDOM from "react-dom";
 import * as jsxRuntime from "react/jsx-runtime";
-import { api, ApiError, EXTENSIONS_CHANGED, json, type ExtensionUi } from "../api";
+import { api, ApiError, EXTENSIONS_CHANGED, json, type ExtensionUi, type ServerCrash } from "../api";
 import { formatDate, formatDateTime, formatNumber, formatTime, useLanguage } from "../i18n";
 import type { Portal } from "@pithagoras/extension-api";
 import { onChatFeed, useChatFeed } from "./chat-feed";
@@ -58,6 +58,8 @@ let seen: string | undefined;
 let failures: Readonly<Record<string, string>> = {};
 /** Why an extension's server half is not running, as the portal says. */
 let serverFailures: Readonly<Record<string, string>> = {};
+/** The crash an extension's server half is held off for, as the portal says. */
+let serverCrashes: Readonly<Record<string, ServerCrash>> = {};
 /** Why an extension's browser half failed in a page, this one or another, to load or to draw, as the portal was told. */
 let clientFailures: Readonly<Record<string, string>> = {};
 /** Whether the list has been gone through once: before that, an entry not there may only not be there yet. */
@@ -292,6 +294,7 @@ async function sync(): Promise<void> {
     }
     failures = {};
     serverFailures = Object.fromEntries(extensions.filter((ext) => ext.serverError).map((ext) => [ext.name, ext.serverError!]));
+    serverCrashes = Object.fromEntries(extensions.filter((ext) => ext.crash).map((ext) => [ext.name, ext.crash!]));
     clientFailures = Object.fromEntries(extensions.filter((ext) => ext.clientError).map((ext) => [ext.name, ext.clientError!]));
     onlyWaitFor(extensions.filter((ext) => ext.entry).map((ext) => ext.name));
     rankExtensions(extensions.map((ext) => ext.name));
@@ -321,7 +324,7 @@ export function loadExtensions(): Promise<void> {
 /**
  * What is installed, as the portal says it with the list of chats (GET /api/sessions): when it is not what the list
  * this page last went through was said with, it was changed since, here or elsewhere (another tab, the API, an agent),
- * and the page goes through it again. Fired once for each change, whatever becomes of that.
+ * or a server half crashed, and the page goes through it again. Fired once for each change, whatever becomes of that.
  */
 export function followInstalled(revision: string): void {
   if (revision === seen) return;
@@ -411,19 +414,21 @@ function watch(watcher: () => void) {
 }
 
 /**
- * Whether the installed extensions have been gone through, why any of them is not in the page, and why any failed
- * in a page, this one or another.
+ * Whether the installed extensions have been gone through, why any of them is not in the page, why any failed in a
+ * page, this one or another, and why its server half is not running.
  */
 export function useExtensions(): {
   settled: boolean;
   failures: Readonly<Record<string, string>>;
   serverFailures: Readonly<Record<string, string>>;
+  serverCrashes: Readonly<Record<string, ServerCrash>>;
   clientFailures: Readonly<Record<string, string>>;
 } {
   return {
     settled: useSyncExternalStore(watch, () => settled),
     failures: useSyncExternalStore(watch, () => failures),
     serverFailures: useSyncExternalStore(watch, () => serverFailures),
+    serverCrashes: useSyncExternalStore(watch, () => serverCrashes),
     clientFailures: useSyncExternalStore(watch, () => clientFailures),
   };
 }
