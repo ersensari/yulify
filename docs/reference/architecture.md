@@ -91,7 +91,6 @@ stray file would attach the wrong conversation.
 | `settings` | Portal-wide overrides, and the small things the portal remembers (the tools it has seen, the model's context windows) |
 | `project_tools` | A project's tool switches |
 | `open_subagents` | The subagents still running in a session |
-| `voice_presets` | The saved voices |
 | `signed_out` | Logins that were ended early, until they would have expired anyway |
 
 Changes to the schema are made in place — `ALTER TABLE` rather than recreating
@@ -112,9 +111,9 @@ Files, Git and the terminal are extensions too, whose server halves work in the
 session's folder through what the portal gives every extension
 ([Building an extension](/guide/extension-ui)): `portal.files`
 (`core/server/src/workspace-files.ts`) and `portal.git` (`git.ts`); the
-terminal runs a pty for each terminal itself. Managed add-ons — Voice, Understory — are Docker containers
-the portal starts through the socket, and Browser's container is run through the
-[Docker](/guide/docker) extension, which every extension that runs containers builds on; voice shares the portal's network
+terminal runs a pty for each terminal itself. Understory, a managed add-on, is a Docker container
+the portal starts through the socket, and the containers of Browser and of the voice service (Voice) are run through the
+[Docker](/guide/docker) extension, which every extension that runs containers builds on; the voice container shares the portal's network
 namespace so its services need no published ports. Opt-in pi extensions the
 portal ships (`extensions/`, the subagent tool) are installed as local pi
 packages only when switched on. The server holds one socket in its data

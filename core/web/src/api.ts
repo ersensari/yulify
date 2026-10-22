@@ -1,6 +1,5 @@
 import { t } from "./i18n";
 import { samplesWav } from "./voice";
-import type { Host, VoiceChoice } from "../../server/src/voice-engines";
 import type { OrbStyle } from "../../server/src/orb-style";
 import type { ChatMessage } from "./memory-chat";
 export type SessionStatus = "idle" | "running" | "error" | "interrupted";
@@ -139,7 +138,7 @@ export interface Agent {
   channels: { slug: string; name: string }[];
   /** Its avatar. */
   orb: OrbStyle;
-  /** The voice it speaks with: "design", a voice library id, or "" for the one in the voice settings. */
+  /** The voice it speaks with: an id from the voices voice mode's source offers, or "" for its own choice. */
   voice: string;
   /** How it looks around on its own. */
   heartbeat: {
@@ -440,24 +439,23 @@ export interface VoiceConfig {
   // The model spoken turns run on, "provider/model"; empty means the chat's own.
   voiceModel?: string;
   pipelineMode?: "parallel" | "sequential";
-  // False with no speech synthesis (runtime "none") where voice mode listens now: the page can listen, but replies are not spoken.
-  speech?: boolean;
-  // The extension voice mode listens and speaks through, by its package's name; empty for the addresses below, the person's own.
-  provider?: string;
-  // The extensions that offer voice mode a place to listen and speak.
-  providers?: VoiceProvider[];
+  // The extension voice mode listens and speaks through, by its package's name; "" for none.
+  provider: string;
+  // Its label, while its server half runs.
+  label?: string;
+  // Whether it can be used now.
+  ready: boolean;
+  // False where it recognises speech alone: the page can listen, but replies are not spoken.
+  speech: boolean;
+  // The voices it offers now, which an agent's voice is chosen from.
+  voices: { id: string; name: string; builtIn?: boolean }[];
+  // Voice mode is on while it has a source.
+  enabled: boolean;
   vad?: typeof DEFAULT_VAD;
-  enabled: boolean; lazyLoad?: boolean; managed?: boolean; whisperUrl: string; breezeUrl: string; instruction: string; voice?: string; language?: string; cfgScale?: number; runtime?: "breeze" | "audio-cpp" | "chatterbox" | "kokoro" | "none"; sttModel?: string; dictationModel?: string; dictationUrl?: string; exaggeration?: number; kokoroVoice?: string; speed?: number;
 }
-/** An extension that offers voice mode a place to listen and speak: `ready` while it can be used now, with how it speaks then (`none`: recognition alone). */
-export interface VoiceProvider { name: string; label: string; ready: boolean; runtime?: VoiceConfig["runtime"] }
-/** How voice mode speaks with these settings: through the extension chosen while it answers, else at the person's own addresses. */
-export const speakingRuntime = (config: VoiceConfig): VoiceConfig["runtime"] =>
-  config.provider ? config.providers?.find((p) => p.name === config.provider)?.runtime : config.runtime;
+/** What the page saves of voice mode: how a spoken conversation goes, whatever listens and speaks for it. */
+export interface VoiceModeSave { vad: typeof DEFAULT_VAD; responseInstructions: string; skipThinkingProviders?: string[]; voiceModel: string }
 
-export interface VoiceInstallStatus { available: boolean; state: string; busy: boolean; progress: string; error: string; choice?: VoiceChoice; /** The saved settings point at the managed service, whether or not its container is there. */ connected?: boolean; }
-/** The GPUs the voice container can use, as nvidia-smi reports them, and the combination that fits the one it would take. */
-export interface VoiceHardware { gpus: { index: number; uuid?: string; name: string; totalMiB: number | null; freeMiB: number | null }[]; source: string; error: string; /** False while nothing could be asked yet, so that no GPU is not yet the same as none. */ checked: boolean; /** The check found there is no GPU: what is suggested is speech recognition alone, on the CPU. */ cpuOnly: boolean; /** Cards the host lists that Docker cannot hand to a container: for voice there are none. */ unusable?: string[]; /** What recognition on the CPU has to run on. */ host: Host; selected: number | null; /** The UUID of the GPU chosen on the page, empty where none is, or the one chosen is no longer there. */ chosen: string; reserveMiB: number; suggestion: VoiceChoice; }
 /** Who is signed in, and how one signs in. */
 export interface AuthStatus {
   authRequired: boolean;
@@ -501,13 +499,6 @@ export const api = {
    */
   uploadFile: (sessionId: string, dir: string, file: File, name = file.name): Promise<{ path: string; size: number }> =>
     uploadBytes(`/api/sessions/${sessionId}/upload?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, file, name),
-  voiceInstallStatus: () => json<VoiceInstallStatus>('/api/voice/install'),
-  // `choice` is for install: the engines to build for. Without it an install keeps what is installed, or picks for the GPU.
-  voiceAction: (action: 'install' | 'start' | 'stop', choice?: VoiceChoice) => json<{ok:boolean}>(`/api/voice/${action}`, {method:'POST', ...(choice ? {body: JSON.stringify(choice)} : {})}),
-  voiceHardware: () => json<VoiceHardware>('/api/voice/hardware'),
-  /** Removes the voice container and puts the settings back; `removeData` deletes the downloaded engines and models too. */
-  uninstallVoice: (removeData: boolean) => json<{ok:boolean}>('/api/voice/uninstall', {method:'POST', body: JSON.stringify({removeData})}),
-  connectVoice: () => json<VoiceConfig>('/api/voice/connect', {method:'POST'}),
   /** What was said in `samples` (16 kHz mono), in words, and how long the speech server says it took. Dictation may be set to use another model than voice mode. */
   transcribe: async (sessionId: string, samples: Float32Array, signal?: AbortSignal, purpose?: "dictation"): Promise<{ text: string; serverTiming: string }> => {
     const res = await send(`/api/sessions/${sessionId}/voice/transcribe${purpose ? `?purpose=${purpose}` : ""}`, { method: "POST", headers: { "Content-Type": "audio/wav" }, body: samplesWav(samples), signal });
@@ -515,9 +506,10 @@ export const api = {
     if (!res.ok) throw new ApiError(body.error || t("Transcription failed"), res.status, body);
     return { text: String(body.text ?? ""), serverTiming: res.headers.get("server-timing") ?? "" };
   },
-  setVoiceGpu: (gpu: string) => json<{ selected: string; restarting: boolean }>('/api/voice/gpu', { method: 'PUT', body: JSON.stringify({ gpu }) }),
   voice: () => json<VoiceConfig>("/api/voice"),
-  setVoice: (value: VoiceConfig) => json<VoiceConfig>("/api/voice", { method: "PUT", body: JSON.stringify(value) }),
+  setVoice: (value: VoiceModeSave) => json<VoiceConfig>("/api/voice", { method: "PUT", body: JSON.stringify(value) }),
+  /** Voice mode stops using its source: it is off until an extension's page chooses one again. */
+  stopVoiceSource: () => json<VoiceConfig>("/api/voice/provider", { method: "DELETE" }),
   /** `setup`: no password has been chosen yet, so the page asks for one. `oidc`: a single sign-on provider is offered too. */
   authStatus: () => json<AuthStatus>("/api/auth/status"),
   login: (password: string) =>

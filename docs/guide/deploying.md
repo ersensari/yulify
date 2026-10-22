@@ -248,14 +248,18 @@ mounted at `/workspaces`, and has to be set. Keep the portal's
 
 ## Installing add-ons
 
-To install Voice from Settings, or the agent's browser through the Browser and
-Docker extensions:
+To install the voice service through the Voice and Docker extensions, or the
+agent's browser through the Browser and Docker extensions (Voice servers, for
+speech servers you run yourself, needs neither):
 
 - Keep the **Docker socket mount** and **host networking**.
-- For Voice, configure **NVIDIA Container Toolkit** on the host.
+- For voice service engines on an NVIDIA GPU, configure **NVIDIA Container
+  Toolkit** on the host. Kokoro and speech recognition run on the CPU without a
+  GPU or the toolkit ([GPU access for Voice](/guide/voice-service#gpu-access-for-voice)).
 
-Follow [Docker add-ons](/guide/add-ons) for Voice's installation, controls,
-storage and cleanup, and [The agent's browser](/guide/browser) for the browser's.
+Follow [The voice service](/guide/voice-service) for its installation, controls,
+storage and cleanup, [Voice servers](/guide/voice-servers) for your own speech
+servers, and [The agent's browser](/guide/browser) for the browser's.
 
 ## The runner image
 
@@ -362,7 +366,7 @@ into place by hand without them is sent as it is.
 | --- | --- |
 | `/data` | Everything stateful — see below |
 | `/workspaces` | The directories pi works in, mounted from `WORKSPACES_DIR` |
-| `/var/run/docker.sock` | The managed Voice add-on, the [Docker](/guide/docker) extension (which runs the [Browser](/guide/browser) extension's container) and `EXECUTOR=container` |
+| `/var/run/docker.sock` | The [Docker](/guide/docker) extension (which runs the containers of the [Browser](/guide/browser) and [Voice](/guide/voice-service) extensions), Understory and `EXECUTOR=container` |
 
 The portal closes `/data` to every account but the one it runs as (mode `0700`)
 each time it starts, a folder made by hand or by an older version too:
@@ -504,11 +508,11 @@ Everything here is optional except, with the Compose files, `WORKSPACES_DIR`.
 | `WORKSPACES_DIR` | — (required) | Compose only: the host folder mounted at `/workspaces`. |
 | `PORTAL_DATA_DIR` | `portal-data` volume (`pithagoras-data` in the Portainer stack) | Compose only: an absolute host path to mount at `/data` instead of the volume. |
 | `PORTAL_TLS_CERT` / `PORTAL_TLS_KEY` | — | Serve over HTTPS when both name a file; both Compose files mount `PORTAL_TLS_DIR` at `/certs`, so name the files there (`/certs/portal.crt`). |
-| `PORTAL_CONTAINER_NAME` | `pithagoras` (Compose) | The portal's own container name, for managed add-ons and container mounts. Unset natively. |
+| `PORTAL_CONTAINER_NAME` | `pithagoras` (Compose) | The portal's own container name, for the containers that share its network (the voice service, Understory) and container mounts. Unset natively. |
 | `PI_IMAGE` | `pithagoras-runner:latest` | Container executor's image. |
 | `TASK_MEMORY_MB` / `TASK_CPUS` / `TASK_PIDS_LIMIT` | `2048` / `2` / `512` | Container executor limits. |
-| `DOCKER_SOCKET` | `/var/run/docker.sock` | The Docker socket the add-ons and container executor talk to. |
-| `VOICE_GPU` / `VOICE_VRAM_RESERVE_MIB` | — | Managed voice: the GPU it uses where none is chosen on the voice page, and memory in MiB to keep free on it. Both Compose files pass them from `.env`; see [Docker add-ons](/guide/add-ons#engines-devices-and-memory). |
+| `DOCKER_SOCKET` | `/var/run/docker.sock` | The Docker socket the [Docker](/guide/docker) extension, Understory and the container executor talk to. |
+| `VOICE_GPU` / `VOICE_VRAM_RESERVE_MIB` | — | The voice service: the GPU it uses where none is chosen on its page, and memory in MiB to keep free on it. Read by the Voice extension; both Compose files pass them from `.env`; see [The voice service](/guide/voice-service#engines-devices-and-memory). |
 | `NPM_REGISTRY_URL` | `https://registry.npmjs.org` | Registry the package catalogue searches. |
 | `CHANNELS_DIR` | `/data/channels` (from source: `$DATA_DIR/channels`) | Where third-party channel packages install. |
 | `AGENT_HOME` | `/data/agent-home` (from source: `$DATA_DIR/agent-home`) | The first agent's directory. Other agents are made in `agents/` beside it. |
