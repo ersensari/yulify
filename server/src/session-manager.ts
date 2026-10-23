@@ -2403,7 +2403,7 @@ class SessionManager extends EventEmitter {
 
   private duplexAssistantResponses = new Map<string, Set<string>>();
 
-  /** Persist one final, already-sanitized Ultravox assistant response. User words are never inferred here. */
+  /** Persist one final, already-sanitized Gemma assistant response. User words are never inferred here. */
   recordDuplexAssistant(sessionId: string, responseId: string, text: string): boolean {
     if (!getSession(sessionId) || !responseId || responseId.length > 256 || !text.trim() || Buffer.byteLength(text, "utf8") > 16_384) return false;
     let seen = this.duplexAssistantResponses.get(sessionId);
@@ -2413,13 +2413,26 @@ class SessionManager extends EventEmitter {
     if (seen.size > 128) seen.delete(seen.values().next().value!);
     const message = {
       id: responseId, role: "assistant", content: [{ type: "text", text }],
-      api: "openai-completions", provider: "forgeloop-provider", model: "ultravox-1b",
+      api: "openai-completions", provider: "forgeloop-provider", model: "gemma4-e4b",
       usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
       stopReason: "stop", timestamp: Date.now(),
     };
     this.record(sessionId, "message_start", { type: "message_start", message });
     this.record(sessionId, "message_update", { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
     this.record(sessionId, "message_end", { type: "message_end", message });
+    return true;
+  }
+
+  /** Display recognized speech without sending it through a second Pi model. */
+  recordDuplexUser(sessionId: string, responseId: string, text: string): boolean {
+    if (!getSession(sessionId) || !responseId || responseId.length > 256 || !text.trim() || Buffer.byteLength(text, "utf8") > 16_384) return false;
+    let seen = this.duplexAssistantResponses.get(sessionId);
+    if (!seen) { seen = new Set(); this.duplexAssistantResponses.set(sessionId, seen); }
+    const key = `user:${responseId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (seen.size > 128) seen.delete(seen.values().next().value!);
+    this.record(sessionId, "portal_prompt", { message: text, voice: true, duplex: true });
     return true;
   }
 

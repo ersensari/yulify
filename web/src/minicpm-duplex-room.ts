@@ -9,7 +9,7 @@ export type DuplexRoomHooks = {
 
 type RoomGrant = { url: string; room: string; token: string };
 
-/** LiveKit transport for Ultravox LiveKit voice. Audio AEC/NS are browser WebRTC features. */
+/** LiveKit transport for Gemma E4B LiveKit voice. Audio AEC/NS are browser WebRTC features. */
 export class MiniCpmDuplexRoom {
   private room?: Room;
   private grant?: RoomGrant;
@@ -29,9 +29,9 @@ export class MiniCpmDuplexRoom {
     this.meterContext = new AudioContext();
     void this.meterContext.resume().catch(() => undefined);
     this.hooks.state?.("connecting");
-    const response = await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/ultravox/room`, { method: "POST" });
+    const response = await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/gemma4/room`, { method: "POST" });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error?.message || `Could not start Ultravox voice (${response.status})`);
+    if (!response.ok) throw new Error(body?.error?.message || `Could not start Gemma E4B voice (${response.status})`);
     this.grant = body as RoomGrant;
     const room = this.room = new Room({ adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: true });
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _publication: RemoteTrackPublication, _participant: RemoteParticipant) => {
@@ -71,7 +71,7 @@ export class MiniCpmDuplexRoom {
   }
 
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
-    if (!this.room) throw new Error("Ultravox voice is not connected");
+    if (!this.room) throw new Error("Gemma E4B voice is not connected");
     this.microphoneEnabled = enabled;
     const track = this.microphone;
     if (!track) return; // Recovery applies the most recent policy before publishing.
@@ -92,7 +92,7 @@ export class MiniCpmDuplexRoom {
 
   private async replaceMicrophone(): Promise<void> {
     const room = this.room;
-    if (!room || this.disposed) throw new Error("Ultravox voice is not connected");
+    if (!room || this.disposed) throw new Error("Gemma E4B voice is not connected");
     const old = this.microphone;
     const deviceId = old?.mediaStreamTrack.getSettings().deviceId;
     this.stopMeter?.(); this.stopMeter = undefined;
@@ -157,8 +157,8 @@ export class MiniCpmDuplexRoom {
 
   /** Camera is opt-in. Calling this explicitly creates the camera track. */
   async setCamera(enabled: boolean): Promise<void> {
-    if (!this.room) throw new Error("Ultravox voice is not connected");
-    if (enabled) throw new Error("Ultravox yalnızca ses girdisini destekliyor.");
+    if (!this.room) throw new Error("Gemma E4B voice is not connected");
+    if (enabled) throw new Error("Gemma E4B yalnızca ses girdisini destekliyor.");
   }
 
   async close(): Promise<void> {
@@ -177,7 +177,7 @@ export class MiniCpmDuplexRoom {
       }
       this.audioElements.clear();
       if (grant) {
-        await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/ultravox/room`, { method: "DELETE", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room: grant.room }) }).catch(() => undefined);
+        await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/gemma4/room`, { method: "DELETE", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room: grant.room }) }).catch(() => undefined);
       }
       this.hooks.state?.("closed");
     }

@@ -126,9 +126,9 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   }, [sessionId]);
 
   return <div className="relative flex items-center gap-1">
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start Ultravox full-duplex voice")} title={t("Start Ultravox full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop Ultravox full-duplex voice")} title={message || `${t("Stop Ultravox full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start Gemma E4B full-duplex voice")} title={t("Start Gemma E4B full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop Gemma E4B full-duplex voice")} title={message || `${t("Stop Gemma E4B full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
-      {message || toolActivity || <><span className="font-semibold">Ultravox · </span>{caption}</>}
+      {message || toolActivity || <><span className="font-semibold">Gemma E4B · </span>{caption}</>}
     </span>}
   </div>;
 }

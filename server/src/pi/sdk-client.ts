@@ -1312,7 +1312,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       if (schemas.length > 48) throw new Error("Too many active tools for the duplex context; turn off tools this chat does not need.");
     }
     const bytes = Buffer.byteLength(JSON.stringify(schemas), "utf8");
-    if (bytes > 12_000) throw new Error("Authorized MCP tool schemas exceed the 8K duplex context budget; turn off tools this chat does not need.");
+    if (bytes > 32_000) throw new Error("Authorized MCP tool schemas exceed the Gemma voice context budget; turn off tools this chat does not need.");
     return schemas;
   }
 

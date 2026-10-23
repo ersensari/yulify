@@ -2,7 +2,7 @@ import express, { type Router } from "express";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { AccessToken, AgentDispatchClient, RoomServiceClient, TrackSource, ServerError } from "livekit-server-sdk";
 import { nanoid } from "nanoid";
-import { getSession, getVoiceInstructions } from "../db.js";
+import { getSession, getVoiceInstructions, getSettings } from "../db.js";
 import { voiceInstructions, voiceRulesOn } from "../pi/voice-first.js";
 import { CLIENT_CONTROL_RULE } from "../pi/client-control-tools.js";
 import { readAgentFile } from "../agent-setup.js";
@@ -11,7 +11,7 @@ import { CONTEXT_FILES, SHARED_FILES } from "../pi/context-files.js";
 import { understoryOn } from "../features.js";
 import { sessions } from "../session-manager.js";
 
-const AGENT_NAME = "yulify-ultravox";
+const AGENT_NAME = "yulify-gemma4";
 const MAX_ACTIVE = 1;
 type ActiveRoom = { room: string; dispatchId: string; sessionId: string; bridgeToken: string; createdAt: number; lastSeenAt: number; calls: Map<string, { controller: AbortController; signature: string; promise: Promise<any> }> };
 const active = new Map<string, ActiveRoom>();
@@ -33,23 +33,23 @@ function liveKitConfig() {
   const serverUrl = process.env.LIVEKIT_SERVER_URL?.trim();
   const key = process.env.LIVEKIT_API_KEY?.trim();
   const secret = process.env.LIVEKIT_API_SECRET?.trim();
-  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for Ultravox duplex");
+  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for Gemma E4B duplex");
   if (!/^wss?:\/\//i.test(publicUrl) || !/^https?:\/\//i.test(serverUrl)) throw new Error("LiveKit public/server URLs use unsupported protocols");
   return { publicUrl, serverUrl, key, secret };
 }
 
-/** Authenticated room issuance for the dedicated Ultravox LiveKit voice worker. */
+/** Authenticated room issuance for the dedicated Gemma E4B LiveKit voice worker. */
 export function minicpmDuplexRouter(): Router {
   const router = express.Router();
-  router.post("/sessions/:id/voice/ultravox/room", async (req, res) => {
+  router.post("/sessions/:id/voice/gemma4/room", async (req, res) => {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     if (!getSession(sessionId)) return res.status(404).json({ error: { code: "session_not_found", message: "Chat session not found", retryable: false } });
-    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The Ultravox voice session is busy. Try again after it closes.", retryable: true } });
+    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The Gemma E4B voice session is busy. Try again after it closes.", retryable: true } });
     if (sessions.isBusy(sessionId)) return res.status(409).json({ error: { code: "chat_busy", message: "Finish the current Yulify chat operation before starting voice tools.", retryable: true } });
     starting = true;
     try {
-      // Simple Ultravox trial: voice only; delegation comes in stage two.
+      // Native Gemma audio input with session-authorized tool execution.
       const cfg = liveKitConfig();
       const rooms = new RoomServiceClient(cfg.serverUrl, cfg.key, cfg.secret);
       const dispatches = new AgentDispatchClient(cfg.serverUrl, cfg.key, cfg.secret);
@@ -63,27 +63,27 @@ export function minicpmDuplexRouter(): Router {
         const recentlyCreated = Date.now() - current.createdAt < 30_000;
         const heartbeatFresh = Date.now() - current.lastSeenAt < 90_000;
         if (found.length && (recentlyCreated || (hasAgent && heartbeatFresh))) {
-          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active Ultravox voice room. Stop it before reconnecting.", retryable: true } });
+          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active Gemma E4B voice room. Stop it before reconnecting.", retryable: true } });
         }
         if (found.length) await rooms.deleteRoom(current.room);
         for (const call of current.calls.values()) call.controller.abort(new Error("Stale voice room replaced."));
         active.delete(sessionId);
       }
-      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Ultravox voice session is busy. Try again after it closes.", retryable: true } });
+      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Gemma E4B voice session is busy. Try again after it closes.", retryable: true } });
       const room = `yulify-${nanoid(20).toLowerCase()}`;
       const identity = `browser-${nanoid(16).toLowerCase()}`;
       await rooms.createRoom({ name: room, emptyTimeout: 60, departureTimeout: 20, maxParticipants: 2 });
       let dispatchId = "";
       try {
         const bridgeToken = randomBytes(32).toString("base64url");
-        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "ultravox-duplex-v1", bridgeToken }) });
+        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "gemma4-duplex-v1", bridgeToken }) });
         dispatchId = dispatch.id;
         const token = new AccessToken(cfg.key, cfg.secret, {
           identity,
           name: "Yulify voice",
           ttl: "5m",
-          metadata: JSON.stringify({ sessionId, runtime: "ultravox" }),
-          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "ultravox" },
+          metadata: JSON.stringify({ sessionId, runtime: "gemma4" }),
+          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "gemma4" },
         });
         token.addGrant({
           roomJoin: true,
@@ -94,7 +94,7 @@ export function minicpmDuplexRouter(): Router {
         });
         const jwt = await token.toJwt();
         active.set(sessionId, { room, dispatchId, sessionId, bridgeToken, createdAt: Date.now(), lastSeenAt: Date.now(), calls: new Map() });
-        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: false, tools: false } });
+        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: true, tools: true } });
       } catch (error) {
         if (dispatchId) await dispatches.deleteDispatch(dispatchId, room).catch(() => undefined);
         await rooms.deleteRoom(room).catch(() => undefined);
@@ -103,13 +103,13 @@ export function minicpmDuplexRouter(): Router {
     } catch (error) {
       const message = (error as Error).message;
       const missingConfig = message.includes("not configured");
-      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "Ultravox voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
+      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "Gemma E4B voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
     } finally {
       starting = false;
     }
   });
 
-  router.delete("/sessions/:id/voice/ultravox/room", async (req, res) => {
+  router.delete("/sessions/:id/voice/gemma4/room", async (req, res) => {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     const current = active.get(sessionId);
@@ -127,7 +127,7 @@ export function minicpmDuplexRouter(): Router {
       if (active.get(sessionId) === current) active.delete(sessionId);
       return res.json({ ok: true });
     } catch (error) {
-      return res.status(502).json({ error: { code: "room_close_failed", message: "Ultravox voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
+      return res.status(502).json({ error: { code: "room_close_failed", message: "Gemma E4B voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
     }
   });
   return router;
@@ -148,7 +148,7 @@ function authorizedRoom(req: express.Request, sessionId: string): ActiveRoom | u
 /** Worker-only bridge. It is mounted before portal cookie auth, but each request needs its room-scoped random bearer token. */
 export function minicpmDuplexBridgeRouter(): Router {
   const router = express.Router();
-  router.post("/sessions/:id/voice/ultravox/bridge/heartbeat", (req, res) => {
+  router.post("/sessions/:id/voice/gemma4/bridge/heartbeat", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
@@ -156,7 +156,7 @@ export function minicpmDuplexBridgeRouter(): Router {
     return res.json({ ok: true, idle_ttl_seconds: ROOM_IDLE_TTL_MS / 1000 });
   });
 
-  router.get("/sessions/:id/voice/ultravox/bridge/tools", async (req, res) => {
+  router.get("/sessions/:id/voice/gemma4/bridge/tools", async (req, res) => {
     const sessionId = String(req.params.id);
     if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
     try {
@@ -177,7 +177,7 @@ export function minicpmDuplexBridgeRouter(): Router {
     }
   });
 
-  router.post("/sessions/:id/voice/ultravox/bridge/tools/:callId", async (req, res) => {
+  router.post("/sessions/:id/voice/gemma4/bridge/tools/:callId", async (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
@@ -216,24 +216,31 @@ export function minicpmDuplexBridgeRouter(): Router {
     if (!res.headersSent) return res.json(result);
   });
 
-  router.post("/sessions/:id/voice/ultravox/bridge/events", (req, res) => {
+  router.get("/sessions/:id/voice/gemma4/bridge/config", (req, res) => {
+    const sessionId = String(req.params.id);
+    if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
+    const level = getSession(sessionId)?.thinking_level || getSettings().thinkingLevel || "off";
+    return res.json({ thinking_enabled: level !== "off" && level !== "none" });
+  });
+
+  router.post("/sessions/:id/voice/gemma4/bridge/events", (req, res) => {
     const sessionId = String(req.params.id);
     if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
     const { response_id: responseId, type, text } = req.body ?? {};
-    if (type !== "assistant.final" || typeof responseId !== "string" || !responseId || responseId.length > 256 || typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "only a final assistant response is accepted" });
+    if (!(["assistant.final", "user.final"].includes(type)) || typeof responseId !== "string" || !responseId || responseId.length > 256 || typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "only a final transcript or assistant response is accepted" });
     if (Buffer.byteLength(text, "utf8") > 16_384) return res.status(413).json({ error: "assistant response exceeds the transcript limit" });
-    const recorded = sessions.recordDuplexAssistant(sessionId, responseId, text);
+    const recorded = type === "user.final" ? sessions.recordDuplexUser(sessionId, responseId, text) : sessions.recordDuplexAssistant(sessionId, responseId, text);
     return res.json({ ok: true, recorded });
   });
 
-  router.delete("/sessions/:id/voice/ultravox/bridge/tools/:callId", (req, res) => {
+  router.delete("/sessions/:id/voice/gemma4/bridge/tools/:callId", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
     room.calls.get(String(req.params.callId))?.controller.abort(new Error("Tool call cancelled by duplex worker."));
     return res.json({ ok: true });
   });
-  router.delete("/sessions/:id/voice/ultravox/bridge/tools", (req, res) => {
+  router.delete("/sessions/:id/voice/gemma4/bridge/tools", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
