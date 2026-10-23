@@ -28,6 +28,17 @@ export interface PiStats {
 }
 
 /** A tool a session could use, and where it came from. */
+export interface DuplexToolSchema {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface DuplexToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError: boolean;
+}
+
 export interface PiTool {
   name: string;
   description?: string;
@@ -138,6 +149,10 @@ export interface PiClient extends EventEmitter {
    * Optional: an executor that cannot ask pi leaves it out.
    */
   getTools?(): Promise<PiTool[]>;
+  /** Live, session-authorized schemas for the native duplex bridge. */
+  getDuplexToolSchemas?(): Promise<DuplexToolSchema[]>;
+  /** Execute one validated tool against this session's actual SDK tool registry. */
+  executeDuplexTool?(name: string, args: unknown, callId: string, signal: AbortSignal, onUpdate?: (update: unknown) => void): Promise<DuplexToolResult>;
   /** Switch tools off by name. Everything not named is on. */
   setToolsOff?(names: string[]): Promise<void>;
 

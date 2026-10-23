@@ -78,6 +78,7 @@ import { memoryLlmRouter } from "./memory-llm.js";
 import { modelLevels, modelRuntime, providersRouter } from "./api/providers.js";
 import { peopleRouter } from "./api/people.js";
 import { voiceRouter, config as voiceConfig, engineUrl } from "./api/voice.js";
+import { minicpmDuplexBridgeRouter, minicpmDuplexRouter } from "./api/minicpm-duplex.js";
 import { noteMessage } from "./pi/reply-language.js";
 import { meetingNotesRouter } from "./api/meeting-notes.js";
 import { speechRouter } from "./api/speech.js";
@@ -168,6 +169,7 @@ app.post("/api/auth/logout", (req, res) => {
 
 // Understory's model server, in "the chat's" mode: its own token, not a portal login.
 app.use(memoryLlmRouter((id) => sessions.currentModel(id)));
+app.use("/api", minicpmDuplexBridgeRouter());
 app.use("/api", requireAuth);
 
 // --- global settings (defaults for every new session) ---
@@ -1430,6 +1432,7 @@ app.use("/api", providersRouter());
 app.use("/api", peopleRouter());
 app.use("/api", browserRouter());
 app.use("/api", voiceRouter());
+app.use("/api", minicpmDuplexRouter());
 app.use("/api", meetingNotesRouter());
 app.use("/api", speechRouter());
 app.use("/api", musicRouter());

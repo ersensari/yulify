@@ -14,10 +14,11 @@ import { BROWSER_READING_RULE, BROWSER_SCREENSHOT_RULE } from "./browser-mcp-rul
 import { browserTools } from "../browser/tools.js";
 import { bundledPath } from "../bundled.js";
 import { EventEmitter } from "node:events";
+import { Value } from "typebox/value";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { DraftStore, PiClient, PiCommand, PiState, PiStats, PiTool, PromptTaken } from "./types.js";
+import type { DraftStore, DuplexToolResult, DuplexToolSchema, PiClient, PiCommand, PiState, PiStats, PiTool, PromptTaken } from "./types.js";
 import type { ImageContent } from "../prompt-images.js";
 import { routineTools } from "./routine-tools.js";
 import { reportTool, reportToFor } from "./report-tool.js";
@@ -318,6 +319,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
   private appliedModel?: object;
   /** What each model's own definition says its window is, as last seen on a model that was pi's. */
   private definitionWindows = new Map<string, number | undefined>();
+  /** Scoped override used only while the duplex ask_strata tool executes. */
+  private duplexSubagentModelOverride?: string;
 
   private constructor(
     private readonly session: any,
@@ -553,7 +556,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         eventBus,
         (event) => client.emit("event", event),
         () => {
-          const model = opts.subagentModel?.();
+          const model = client.duplexSubagentModelOverride ?? opts.subagentModel?.();
           return model ? { model } : {};
         },
       );
@@ -1277,6 +1280,120 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     } catch (e) {
       console.error(`[portal] could not apply the tool switches: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * The tool schemas the native duplex model may use, sourced from this live Pi session.
+   * The installed `subagent` tool is exposed only as a deliberate `ask_strata` capability.
+   */
+  async getDuplexToolSchemas(): Promise<DuplexToolSchema[]> {
+    const session = this.session;
+    const agent = session?.agent;
+    const active = new Set<string>(session?.getActiveToolNames?.() ?? []);
+    const tools: any[] = Array.isArray(agent?.state?.tools) ? agent.state.tools : [];
+    const schemas: DuplexToolSchema[] = [];
+    for (const tool of tools) {
+      const name = String(tool?.name ?? "");
+      if (!name || !active.has(name) || this.switchedOff.has(name) || (this.wanted.size > 0 && !this.wanted.has(name))) continue;
+      // MiniCPM may call only session-authorized MCP tools plus deliberate Strata delegation.
+      // Pi shell, file, image and other native tools are intentionally not exposed here.
+      if (name !== "subagent" && !/^mcp(?:_|$)/.test(name) && name !== "end_voice_conversation" && name !== "control_music_player") continue;
+      if (name === "subagent") {
+        schemas.push({
+          name: "ask_strata",
+          description: "Delegate a genuinely difficult research or reasoning task to the configured Strata child agent. Use sparingly, only when the task exceeds ordinary conversation. Provide a self-contained task; the child has no access to this conversation.",
+          parameters: { type: "object", properties: { task: { type: "string", description: "A self-contained difficult task for the Strata child agent." } }, required: ["task"], additionalProperties: false },
+        });
+        continue;
+      }
+      const parameters = tool.parameters;
+      if (!parameters || typeof parameters !== "object") continue;
+      schemas.push({ name, description: String(tool.description ?? tool.label ?? name), parameters: JSON.parse(JSON.stringify(parameters)) });
+      if (schemas.length > 48) throw new Error("Too many active tools for the duplex context; turn off tools this chat does not need.");
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(schemas), "utf8");
+    if (bytes > 12_000) throw new Error("Authorized MCP tool schemas exceed the 8K duplex context budget; turn off tools this chat does not need.");
+    return schemas;
+  }
+
+  /**
+   * Execute a model-emitted call through the same registered SDK tool definition and
+   * before/after hooks as a Pi tool call. This does not send a second model prompt.
+   */
+  async executeDuplexTool(
+    requestedName: string,
+    rawArgs: unknown,
+    callId: string,
+    signal: AbortSignal,
+    onUpdate?: (update: unknown) => void,
+  ): Promise<DuplexToolResult> {
+    if (this.disposed || signal.aborted) throw new Error("Tool call was cancelled.");
+    const agent = this.session?.agent;
+    const state = agent?.state;
+    if (!agent || !state || typeof agent.beforeToolCall !== "function" || typeof agent.afterToolCall !== "function")
+      throw new Error("This Pi executor does not expose the native session tool runtime.");
+    const active = new Set<string>(this.session.getActiveToolNames?.() ?? []);
+    const actualName = requestedName === "ask_strata" ? "subagent" : requestedName;
+    if (requestedName === "subagent") throw new Error("Use ask_strata for deliberate Strata delegation.");
+    if (requestedName !== "ask_strata" && !/^mcp(?:_|$)/.test(requestedName) && requestedName !== "end_voice_conversation" && requestedName !== "control_music_player") throw new Error("Only session-authorized MCP tools, client voice/music controls and ask_strata are available to MiniCPM.");
+    if (!active.has(actualName) || this.switchedOff.has(actualName)) throw new Error(`Tool ${requestedName} is not enabled in this Yulify session.`);
+    const tool = (state.tools ?? []).find((candidate: any) => candidate?.name === actualName);
+    if (!tool || typeof tool.execute !== "function") throw new Error(`Tool ${requestedName} is not available in this Pi session.`);
+    let args: any = rawArgs;
+    if (requestedName === "ask_strata") {
+      if (!rawArgs || typeof rawArgs !== "object" || typeof (rawArgs as any).task !== "string") throw new Error("ask_strata requires a self-contained task string.");
+      args = { task: (rawArgs as any).task, label: "Strata: difficult task" };
+    }
+    if (typeof tool.prepareArguments === "function") args = tool.prepareArguments(args);
+    if (!Value.Check(tool.parameters, args)) {
+      const errors = [...Value.Errors(tool.parameters, args)].slice(0, 8).map((e: any) => `${e.path || "/"}: ${e.message}`).join("; ");
+      throw new Error(`Invalid arguments for ${requestedName}: ${errors}`.slice(0, 1600));
+    }
+    const toolCall = { type: "toolCall", id: callId, name: actualName, arguments: args };
+    const model = state.model ?? this.session.model ?? {};
+    const assistantMessage: any = {
+      role: "assistant", content: [toolCall], api: model.api ?? "openai-completions",
+      provider: model.provider ?? "unknown", model: model.id ?? "unknown",
+      usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      stopReason: "toolUse", timestamp: Date.now(),
+    };
+    const context: any = { systemPrompt: state.systemPrompt ?? "", messages: state.messages ?? [], tools: state.tools ?? [] };
+    const hookContext = { assistantMessage, toolCall, args, context };
+    const before = await agent.beforeToolCall(hookContext, signal);
+    if (signal.aborted) throw new Error("Tool call was cancelled.");
+    if (before?.block) throw new Error(before.reason || `Tool ${requestedName} was refused by Yulify policy.`);
+
+    const started = Date.now();
+    this.forward({ type: "tool_execution_start", toolCallId: callId, toolName: requestedName, args });
+    const previousOverride = this.duplexSubagentModelOverride;
+    if (requestedName === "ask_strata") this.duplexSubagentModelOverride = process.env.YULIFY_STRATA_SUBAGENT_MODEL || "forgeloop-provider/swift-iq3_xxs";
+    let result: any;
+    let isError = false;
+    try {
+      result = await tool.execute(callId, args, signal, (partial: unknown) => {
+        try { onUpdate?.(partial); this.forward({ type: "tool_execution_update", toolCallId: callId, toolName: requestedName, args, partialResult: partial }); } catch { /* progress observers are best-effort */ }
+      });
+    } catch (error) {
+      isError = true;
+      result = { content: [{ type: "text", text: (error as Error).message || "Tool execution failed." }], details: undefined };
+    } finally {
+      this.duplexSubagentModelOverride = previousOverride;
+    }
+    try {
+      const after = await agent.afterToolCall({ ...hookContext, result, isError }, signal);
+      if (after) result = { ...result, ...after };
+    } catch (error) {
+      isError = true;
+      result = { content: [{ type: "text", text: `Tool finalization failed: ${(error as Error).message}` }], details: undefined };
+    }
+    const content = (Array.isArray(result?.content) ? result.content : []).map((part: any) =>
+      part?.type === "text" && typeof part.text === "string" ? { type: "text" as const, text: part.text.slice(0, 24_000) }
+        : part?.type === "image" ? { type: "text" as const, text: "[Tool returned an image; image data is not included in the duplex context.]" } : null,
+    ).filter(Boolean) as Array<{ type: "text"; text: string }>;
+    const finalText = content.length ? content : [{ type: "text" as const, text: isError ? "Tool failed without a text result." : "Tool completed without a text result." }];
+    if (result?.isError === true) isError = true;
+    this.forward({ type: "tool_execution_end", toolCallId: callId, toolName: requestedName, args, result: { content: finalText, details: result?.details }, isError, durationMs: Date.now() - started });
+    return { content: finalText, isError };
   }
 
   /**

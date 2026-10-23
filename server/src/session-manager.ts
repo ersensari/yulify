@@ -1386,6 +1386,7 @@ class SessionManager extends EventEmitter {
     if (refused) throw new SessionEditError("unsupported", refused);
     // Behind an edit in progress, not through it: see withEdit.
     if (!insideEdit) await this.whenEditable(sessionId);
+    if (this.duplexToolsRunning.has(sessionId)) throw new Error("A voice tool is still running in this chat. Try again in a moment.");
     this.prompting.set(sessionId, (this.prompting.get(sessionId) ?? 0) + 1);
     try {
       return await this.promptNow(sessionId, message, options, insideEdit, stopsBefore);
@@ -1401,6 +1402,7 @@ class SessionManager extends EventEmitter {
    * whose run failed does not go back over one. See settleEdit.
    */
   private prompting = new Map<string, number>();
+  private duplexToolsRunning = new Set<string>();
 
   private async promptNow(sessionId: string, message: string, options: PromptOptions | undefined, insideEdit: boolean, stopsBefore?: number): Promise<boolean> {
     this.mark(sessionId, "running");
@@ -2390,13 +2392,63 @@ class SessionManager extends EventEmitter {
    * would otherwise wait politely behind the very task it means to stop.
    */
   isBusy(sessionId: string): boolean {
-    if (this.asking.has(sessionId)) return true;
+    if (this.asking.has(sessionId) || this.duplexToolsRunning.has(sessionId)) return true;
     return getSession(sessionId)?.status === "running";
   }
 
   /** Access the live client for config reads and writes, starting pi if needed. */
   client(sessionId: string): Promise<PiClient> {
     return this.ensureClient(sessionId);
+  }
+
+  private duplexAssistantResponses = new Map<string, Set<string>>();
+
+  /** Persist one final, already-sanitized MiniCPM assistant response. User words are never inferred here. */
+  recordDuplexAssistant(sessionId: string, responseId: string, text: string): boolean {
+    if (!getSession(sessionId) || !responseId || responseId.length > 256 || !text.trim() || Buffer.byteLength(text, "utf8") > 16_384) return false;
+    let seen = this.duplexAssistantResponses.get(sessionId);
+    if (!seen) { seen = new Set(); this.duplexAssistantResponses.set(sessionId, seen); }
+    if (seen.has(responseId)) return false;
+    seen.add(responseId);
+    if (seen.size > 128) seen.delete(seen.values().next().value!);
+    const message = {
+      id: responseId, role: "assistant", content: [{ type: "text", text }],
+      api: "openai-completions", provider: "forgeloop-provider", model: "MiniCPM-o",
+      usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      stopReason: "stop", timestamp: Date.now(),
+    };
+    this.record(sessionId, "message_start", { type: "message_start", message });
+    this.record(sessionId, "message_update", { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+    this.record(sessionId, "message_end", { type: "message_end", message });
+    return true;
+  }
+
+  /** Session-authorized schemas from the live SDK tool registry; RPC executors cannot expose local tools. */
+  async duplexToolSchemas(sessionId: string) {
+    if (!getSession(sessionId)) throw new Error("Chat session not found.");
+    const client = await this.ensureClient(sessionId);
+    if (!client.getDuplexToolSchemas) throw new Error("This chat executor does not expose native session tools to the duplex worker.");
+    return client.getDuplexToolSchemas();
+  }
+
+  /** Run one validated MiniCPM tool through the same wrapped SDK definitions and guard hooks as Pi. */
+  async executeDuplexTool(sessionId: string, name: string, args: unknown, callId: string, signal: AbortSignal, onUpdate?: (update: unknown) => void) {
+    if (!getSession(sessionId)) throw new Error("Chat session not found.");
+    if (this.duplexToolsRunning.has(sessionId) || this.prompting.has(sessionId) || this.isBusy(sessionId) || this.compacting.has(sessionId) || this.editing.has(sessionId)) {
+      throw new Error("This Yulify chat is busy; retry the voice tool after the current chat operation finishes.");
+    }
+    this.duplexToolsRunning.add(sessionId);
+    this.mark(sessionId, "running");
+    try {
+      const client = await this.ensureClient(sessionId);
+      if (!client.executeDuplexTool) throw new Error("This chat executor cannot execute native session tools.");
+      return await client.executeDuplexTool(name, args, callId, signal, onUpdate);
+    } finally {
+      this.duplexToolsRunning.delete(sessionId);
+      // This method rejects work that was already running, so its own running
+      // marker is the only reason the persisted status is busy here.
+      if (!this.prompting.has(sessionId) && !this.asking.has(sessionId)) this.mark(sessionId, "idle");
+    }
   }
 
   /** True when the message invokes a command pi actually knows about. */
