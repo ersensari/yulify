@@ -41,7 +41,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
           event: event => {
             if (event.type === "voice.activity" && typeof event.activity === "string") onActivity?.(event.activity);
             if (event.type === "response.started") { setMessage(""); setToolActivity(""); onError?.(""); }
-            if (event.type === "user.transcript.final" && typeof event.text === "string") {
+            if (event.type === "user.transcript.final" && typeof event.text === "string" && !responseId.current.startsWith(`${String(event.response_id)}-`)) {
               captionRef.current = event.text; setCaption(event.text); onStatus?.("connected", event.text);
             }
             if (event.type === "microphone.error" && typeof event.message === "string") onError?.(event.message);
