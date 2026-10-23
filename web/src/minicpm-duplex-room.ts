@@ -70,6 +70,11 @@ export class MiniCpmDuplexRoom {
     }
   }
 
+  async interrupt(): Promise<void> {
+    if (!this.room) return;
+    await this.room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "interrupt" })), { reliable: true, topic: "yulify.voice-control" });
+  }
+
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (!this.room) throw new Error("Gemma E4B voice is not connected");
     this.microphoneEnabled = enabled;

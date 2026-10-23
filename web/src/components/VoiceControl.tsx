@@ -26,7 +26,7 @@ import { joinSamples } from "../samples";
 import { asksToRepeat, couldAskToRepeat } from "../voice-commands";
 import { isImage, pending, type Attachment } from "../attachments";
 import { VOICE_RATES } from "./VoiceSettings";
-import { describe, matches, useKeyLabels, useKeybindings } from "../keybindings";
+import { matches, useKeybindings } from "../keybindings";
 import { HandsFreeVoice, type VoicePhase } from "../hands-free";
 import { t } from "../i18n";
 import { MiniCpmDuplexControl } from "./MiniCpmDuplexControl";
@@ -138,6 +138,8 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
   const duplexReconnectRef = useRef<(() => Promise<void>) | null>(null);
   const [duplexMuted, setDuplexMuted] = useState(false);
   const [duplexCaption, setDuplexCaption] = useState("");
+  const duplexToggleRef = useRef<(() => void) | null>(null);
+  const [duplexActivity, setDuplexActivity] = useState("listening");
   const [duplexState, setDuplexState] = useState("closed");
   const duplexActiveRef = useRef(false);
   const duplexMuteRef = useRef<(() => void) | null>(null);
@@ -851,9 +853,12 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
 
   // Start and end voice mode from the keyboard, from the chat as well: the one
   // voice shortcut that works with the message box focused, as it has a modifier.
-  const bindings = useKeybindings(), layout = useKeyLabels();
+  const bindings = useKeybindings();
   const toggleKey = useRef({ binding: bindings["voice.toggle"], on: false, start, end: endMode });
-  toggleKey.current = { binding: bindings["voice.toggle"], on: enabled || starting, start, end: endMode };
+  toggleKey.current = { binding: bindings["voice.toggle"], on: enabled || starting || duplexActive,
+    start: async () => { duplexToggleRef.current?.(); },
+    end: () => { if (duplexActiveRef.current) window.dispatchEvent(new CustomEvent("yulify:end-voice", { detail: { sessionId } })); else endMode(); },
+  };
   useEffect(() => {
     if (!available) return;
     const down = (e: KeyboardEvent) => {
@@ -873,25 +878,30 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
     {profileOpen&&createPortal(<VoiceProfile profiler={profiler.current!} onClose={()=>{setProfileOpen(false);profiler.current!.close('disabled');}}/>,document.body)}
 
     {(starting || enabled || duplexActive) && stageTarget && createPortal(
-      <VoiceStage sessionId={sessionId} folder={folder} workPhase={work} canvasOpen={canvasOpen} onCanvasMinimize={onCanvasMinimize} onCanvasToggle={onCanvasToggle} title={duplexActive ? `${title} · Gemma E4B full duplex` : sequentialMode ? `${title} · ${sentenceMode ? (prefetchMode ? t("Sentence pipeline · buffered audio") : t("Sentence chunks · buffered audio")) : t("Sequential baseline")}` : comparison ? `${title} · ${t("Streaming pipeline")}` : title} phase={duplexActive ? (duplexState === "connected" ? (duplexHearing ? "Hearing you" : "Listening") : "Thinking") : phase} starting={starting || (duplexActive && duplexState !== "connected")} muted={duplexActive ? duplexMuted : muted} speaking={duplexActive ? false : speaking} musicPlaying={musicPlaying}
+      <VoiceStage legacyControls={!duplexActive} sessionId={sessionId} folder={folder} workPhase={work} canvasOpen={canvasOpen} onCanvasMinimize={onCanvasMinimize} onCanvasToggle={onCanvasToggle} title={duplexActive ? `${title} · Gemma E4B full duplex` : sequentialMode ? `${title} · ${sentenceMode ? (prefetchMode ? t("Sentence pipeline · buffered audio") : t("Sentence chunks · buffered audio")) : t("Sequential baseline")}` : comparison ? `${title} · ${t("Streaming pipeline")}` : title} phase={duplexActive ? (duplexState === "connected" ? (duplexHearing ? "Hearing you" : duplexActivity === "transcribing" ? "Transcribing" : duplexActivity === "thinking" || duplexActivity === "tool" ? "Thinking" : duplexActivity === "speaking" ? "Speaking" : "Listening") : "Thinking") : phase} starting={starting || (duplexActive && duplexState !== "connected")} muted={duplexActive ? duplexMuted : muted} speaking={duplexActive ? duplexActivity === "speaking" : speaking} musicPlaying={musicPlaying}
         browserAvailable={browserAvailable} browserActivity={browserActivity} terminalActivity={terminalActivity} toolEvents={toolEvents} sounds={sounds} onSounds={toggleSounds} onCue={cue}
         microphoneTools={duplexActive ? <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-fg-muted"><span>{duplexCapture.label}{duplexCapture.muted ? " · muted" : ""}</span><meter aria-label="Microphone input level" min={0} max={1} value={duplexCapture.level} /><button type="button" className="rounded border border-line px-2 py-1" onClick={() => void duplexReconnectRef.current?.()}>Mikrofonu yeniden bağla</button></div> : undefined}
         levels={levels} transcript={duplexActive ? duplexCaption : transcript} speaker={duplexActive ? undefined : speaker} error={duplexActive ? duplexError : error} onMute={duplexActive ? () => duplexMuteRef.current?.() : toggleMute} onEnd={duplexActive ? () => window.dispatchEvent(new CustomEvent("yulify:end-voice", { detail: { sessionId } })) : endMode} waitingForTap={waitingForTap}
-        items={items} running={running} onStop={() => { void latest.current.onAbort().catch(e => setError((e as Error).message)); }}
+        items={items} running={running || (duplexActive && duplexActivity !== "listening")} onStop={() => { if (duplexActive) window.dispatchEvent(new CustomEvent("yulify:interrupt-voice", { detail: { sessionId } })); else void latest.current.onAbort().catch(e => setError((e as Error).message)); }}
         attachments={attachments} onAddPictures={files => { void addPictures(files); }} onRemovePicture={id => pending.set(sessionId, pending.get(sessionId).filter(a => a.id !== id))}
         canRepeat={canRepeat} onRepeat={() => { repeatReply(); }}
         rate={rate} onRate={value => { local.set('voiceRate', String(value)); setRate(value); }}
         steer={steer} onSteer={value => { local.set('voiceSteer', value ? 'on' : 'off'); setSteer(value); }}
         unknownVoices={unknownVoices} onUnknownVoices={mode => { local.set('voiceOnlyOwner', mode === 'all' ? 'off' : mode === 'enrolled' ? 'on' : 'ask'); setUnknownVoices(mode); }}
-        ptt={ptt} onPtt={value => { void choosePtt(value); }} holding={holding} onHold={hold} />, stageTarget,
+        ptt={duplexActive ? false : ptt} onPtt={value => { void choosePtt(value); }} holding={holding} onHold={hold} />, stageTarget,
     )}
     <div className="relative flex items-center gap-1">
       <button type="button" className="prompt-action" aria-label={t("Profile voice latency")} title={t("Profile voice latency")} aria-pressed={profileOpen} onClick={()=>{setProfileOpen(v=>!v);if(profileOpen)profiler.current!.close('disabled');}}><LuGauge/></button>
-      <MiniCpmDuplexControl sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; setDuplexHearing(value > 0.04); }} onCaptureStatus={setDuplexCapture} onError={setDuplexError} onReconnectControl={control => { duplexReconnectRef.current = control; }} />
+      <MiniCpmDuplexControl onToggleControl={control => { duplexToggleRef.current = control; }} onActivity={setDuplexActivity} sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; setDuplexHearing(value > 0.04); }} onCaptureStatus={setDuplexCapture} onError={setDuplexError} onReconnectControl={control => { duplexReconnectRef.current = control; }} />
       {error && !enabled && !starting && <p role="alert" className="absolute bottom-full right-0 mb-3 w-64 rounded-xl border border-line bg-surface p-3 text-xs text-danger shadow-pop">{error}</p>}
-      <button ref={startButton} type="button" onClick={() => { void start(); }} aria-label={t("Turn on hands-free voice")} title={bindings["voice.toggle"] ? t("Start voice conversation ({keys})", { keys: describe(bindings["voice.toggle"], layout) }) : t("Start voice conversation")} className="prompt-action">
-        {starting ? <LuLoaderCircle aria-hidden className="animate-spin" /> : <LuAudioLines aria-hidden />}
-      </button>
+      <details className="relative">
+        <summary className="prompt-action list-none cursor-pointer" aria-label="Diğer ses seçenekleri" title="Diğer ses seçenekleri">⋯</summary>
+        <div className="absolute bottom-full right-0 z-20 mb-2 rounded-xl border border-line bg-surface p-2 shadow-pop">
+          <button ref={startButton} type="button" disabled={duplexActive} onClick={() => { void start(); }} aria-label="Klasik sesli mod" title="Klasik sesli mod" className="flex items-center gap-2 whitespace-nowrap rounded px-3 py-2 text-sm">
+            {starting ? <LuLoaderCircle aria-hidden className="animate-spin" /> : <LuAudioLines aria-hidden />} Klasik sesli mod
+          </button>
+        </div>
+      </details>
     </div>
   </>;
 }

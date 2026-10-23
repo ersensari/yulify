@@ -151,6 +151,7 @@ export interface PiClient extends EventEmitter {
   getTools?(): Promise<PiTool[]>;
   /** Live, session-authorized schemas for the native duplex bridge. */
   getDuplexToolSchemas?(): Promise<DuplexToolSchema[]>;
+  getDuplexInstructions?(): Promise<string>;
   /** Execute one validated tool against this session's actual SDK tool registry. */
   executeDuplexTool?(name: string, args: unknown, callId: string, signal: AbortSignal, onUpdate?: (update: unknown) => void): Promise<DuplexToolResult>;
   /** Switch tools off by name. Everything not named is on. */

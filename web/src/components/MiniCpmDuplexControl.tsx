@@ -5,7 +5,7 @@ import { t } from "../i18n";
 import { session } from "../safe-storage";
 
 /** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
-export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onError }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onError?: (message: string) => void }) {
+export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onError }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onError?: (message: string) => void }) {
   const room = useRef<MiniCpmDuplexRoom>();
   const release = useRef<(() => void) | undefined>();
   const [state, setState] = useState<DuplexRoomState>("closed");
@@ -26,7 +26,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
     const current = room.current; room.current = undefined;
     await current?.close();
-    setState("closed"); onInputLevel?.(0);
+    setState("closed"); onInputLevel?.(0); onActivity?.("listening");
   };
 
   const start = () => {
@@ -39,6 +39,11 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
+            if (event.type === "voice.activity" && typeof event.activity === "string") onActivity?.(event.activity);
+            if (event.type === "response.started") { setMessage(""); setToolActivity(""); onError?.(""); }
+            if (event.type === "user.transcript.final" && typeof event.text === "string") {
+              captionRef.current = event.text; setCaption(event.text); onStatus?.("connected", event.text);
+            }
             if (event.type === "microphone.error" && typeof event.message === "string") onError?.(event.message);
             if (event.type === "microphone.device" && typeof event.label === "string") setMicrophoneLabel(event.label);
             if (event.type === "microphone.capture" && typeof event.level === "number") {
@@ -56,10 +61,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
               const nextCaption = id && id !== responseId.current ? event.text : captionRef.current + event.text;
               if (id) responseId.current = id;
               captionRef.current = nextCaption; setCaption(nextCaption); onStatus?.("connected", nextCaption);
-            } else if (event.type === "tool.status" && typeof event.name === "string") setToolActivity(`Using ${event.name}…`);
-            else if (event.type === "tool.result" && typeof event.name === "string") setToolActivity(`${event.name}: ${String(event.status ?? "finished")}`);
+            } else if (event.type === "tool.status" && typeof event.name === "string") setToolActivity(event.name === "ask_strata" ? "Ayrıntılı görev üzerinde çalışılıyor…" : event.name.startsWith("music_") ? "Müzik isteği işleniyor…" : event.name.includes("search") ? "Araştırılıyor…" : "İsteğin işleniyor…");
+            else if (event.type === "tool.result" && typeof event.name === "string") setToolActivity(event.status === "success" ? "" : "İşlem tamamlanamadı.");
             else if (event.type === "session.error" && typeof event.message === "string") {
-              setMessage(event.message);
+              setMessage(event.message); onError?.(event.message);
               if (["duplex_failed", "minicpm_disconnected", "resource_busy", "audio_overflow", "engine_backpressure"].includes(String(event.code))) void stop();
             }
           },
@@ -105,7 +110,13 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   };
 
   useEffect(() => {
+    onToggleControl?.(() => { if (room.current) void stop(); else start(); });
+    return () => onToggleControl?.(null);
+  });
+
+  useEffect(() => {
     const end = (event: Event) => { if ((event as CustomEvent).detail?.sessionId === sessionId && session.get("voiceActive") === sessionId) void stop(); };
+    const interrupt = (event: Event) => { if ((event as CustomEvent).detail?.sessionId === sessionId) void room.current?.interrupt(); };
     const playback = (event: Event) => {
       const detail = (event as CustomEvent).detail;
       if (detail?.sessionId !== sessionId) return;
@@ -113,9 +124,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
       void room.current?.setMicrophoneEnabled(!musicPaused.current && !muted.current);
       onStatus?.(state, caption);
     };
+    window.addEventListener("yulify:interrupt-voice", interrupt);
     window.addEventListener("yulify:end-voice", end);
     window.addEventListener("yulify:music-playback", playback);
-    return () => { window.removeEventListener("yulify:end-voice", end); window.removeEventListener("yulify:music-playback", playback); };
+    return () => { window.removeEventListener("yulify:interrupt-voice", interrupt); window.removeEventListener("yulify:end-voice", end); window.removeEventListener("yulify:music-playback", playback); };
   }, [sessionId, state, caption]);
 
   useEffect(() => () => {

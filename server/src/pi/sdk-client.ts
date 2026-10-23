@@ -45,6 +45,12 @@ interface Handoff {
   queued?: string;
 }
 
+const DUPLEX_NATIVE_TOOLS = new Set([
+  "end_voice_conversation", "control_music_player", "web_search", "fetch_content",
+  "canvas_list", "canvas_create", "canvas_read", "canvas_write", "canvas_delete", "get_search_content", "source_check",
+]);
+const duplexToolAllowed = (name: string, definition?: any) => DUPLEX_NATIVE_TOOLS.has(name) || name === "mcp" || /^MCP: /.test(definition?.label ?? "");
+
 function asArray(v: any): any[] {
   const resolved = typeof v === "function" ? v() : v;
   return Array.isArray(resolved) ? resolved : [];
@@ -1295,13 +1301,13 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     for (const tool of tools) {
       const name = String(tool?.name ?? "");
       if (!name || !active.has(name) || this.switchedOff.has(name) || (this.wanted.size > 0 && !this.wanted.has(name))) continue;
-      // MiniCPM may call only session-authorized MCP tools plus deliberate Strata delegation.
+      // Gemma uses session-authorized MCP, web/canvas/client controls and Strata delegation.
       // Pi shell, file, image and other native tools are intentionally not exposed here.
-      if (name !== "subagent" && !/^mcp(?:_|$)/.test(name) && name !== "end_voice_conversation" && name !== "control_music_player") continue;
+      if (name !== "subagent" && !duplexToolAllowed(name, tool)) continue;
       if (name === "subagent") {
         schemas.push({
           name: "ask_strata",
-          description: "Delegate a genuinely difficult research or reasoning task to the configured Strata child agent. Use sparingly, only when the task exceeds ordinary conversation. Provide a self-contained task; the child has no access to this conversation.",
+          description: "Delegate difficult reasoning, multi-source research, coding/debugging or a long multi-step task to the Strata specialist. Provide a self-contained task with relevant conversation facts, constraints and desired output. The child cannot hear this conversation. Ask it to use tools as needed, distinguish evidence from assumptions and return the result, sources and any failure. Do not delegate ordinary conversation, simple arithmetic or a direct player/music command.",
           parameters: { type: "object", properties: { task: { type: "string", description: "A self-contained difficult task for the Strata child agent." } }, required: ["task"], additionalProperties: false },
         });
         continue;
@@ -1311,9 +1317,24 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       schemas.push({ name, description: String(tool.description ?? tool.label ?? name), parameters: JSON.parse(JSON.stringify(parameters)) });
       if (schemas.length > 48) throw new Error("Too many active tools for the duplex context; turn off tools this chat does not need.");
     }
-    const bytes = Buffer.byteLength(JSON.stringify(schemas), "utf8");
-    if (bytes > 32_000) throw new Error("Authorized MCP tool schemas exceed the Gemma voice context budget; turn off tools this chat does not need.");
-    return schemas;
+    // Large mail/calendar schemas are discovered through the active MCP gateway.
+    // Keep complete schemas for voice/music/memory/web/canvas and delegation.
+    let offered = schemas;
+    if (Buffer.byteLength(JSON.stringify(offered), "utf8") > 32_000 && schemas.some(schema => schema.name === "mcp")) {
+      offered = schemas.filter(schema => schema.name === "ask_strata" || schema.name === "mcp" || DUPLEX_NATIVE_TOOLS.has(schema.name) || /^(music|mem0|understory)_/.test(schema.name));
+    }
+    if (Buffer.byteLength(JSON.stringify(offered), "utf8") > 32_000) throw new Error("Active voice tools exceed the context budget; turn off unused tools.");
+    return offered;
+  }
+
+  /** Only trusted, installed music guidance; do not expose arbitrary filesystem reads. */
+  async getDuplexInstructions(): Promise<string> {
+    const skills = asArray(this.session.resourceLoader?.getSkills?.()?.skills);
+    const music = skills.find((skill: any) => skill.name === "yula-music" && !skill.disableModelInvocation);
+    if (!music?.filePath) return "";
+    const body = readFileSync(music.filePath, "utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+    if (Buffer.byteLength(body, "utf8") > 16_000) throw new Error("Music skill exceeds the voice skill budget.");
+    return body;
   }
 
   /**
@@ -1335,7 +1356,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const active = new Set<string>(this.session.getActiveToolNames?.() ?? []);
     const actualName = requestedName === "ask_strata" ? "subagent" : requestedName;
     if (requestedName === "subagent") throw new Error("Use ask_strata for deliberate Strata delegation.");
-    if (requestedName !== "ask_strata" && !/^mcp(?:_|$)/.test(requestedName) && requestedName !== "end_voice_conversation" && requestedName !== "control_music_player") throw new Error("Only session-authorized MCP tools, client voice/music controls and ask_strata are available to MiniCPM.");
+    if (requestedName !== "ask_strata" && !duplexToolAllowed(requestedName, this.session.getToolDefinition?.(requestedName))) throw new Error("Only session-authorized MCP tools, client voice/music controls and ask_strata are available to the Gemma voice assistant.");
     if (!active.has(actualName) || this.switchedOff.has(actualName)) throw new Error(`Tool ${requestedName} is not enabled in this Yulify session.`);
     const tool = (state.tools ?? []).find((candidate: any) => candidate?.name === actualName);
     if (!tool || typeof tool.execute !== "function") throw new Error(`Tool ${requestedName} is not available in this Pi session.`);
@@ -1366,7 +1387,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const started = Date.now();
     this.forward({ type: "tool_execution_start", toolCallId: callId, toolName: requestedName, args });
     const previousOverride = this.duplexSubagentModelOverride;
-    if (requestedName === "ask_strata") this.duplexSubagentModelOverride = process.env.YULIFY_STRATA_SUBAGENT_MODEL || "forgeloop-provider/swift-iq3_xxs";
+    if (requestedName === "ask_strata") this.duplexSubagentModelOverride = process.env.YULIFY_STRATA_SUBAGENT_MODEL || "forgeloop-provider/ornith-1-5-122b-i1-iq3-m";
     let result: any;
     let isError = false;
     try {

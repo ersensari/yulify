@@ -50,11 +50,12 @@ const watchWide = (changed: () => void) => {
 /** Where focus is typing, so Space and a paste belong to that and not to voice mode. */
 const editing = (target: EventTarget | null) => !!(target as Element | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
 
-export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasMinimize, onCanvasToggle, title, phase, starting, muted, speaking, musicPlaying, levels, error, transcript, speaker, onMute, onEnd, browserAvailable, browserActivity, terminalActivity, toolEvents, sounds, onSounds, onCue,
+export function VoiceStage({ legacyControls = true, sessionId, folder, workPhase, canvasOpen, onCanvasMinimize, onCanvasToggle, title, phase, starting, muted, speaking, musicPlaying, levels, error, transcript, speaker, onMute, onEnd, browserAvailable, browserActivity, terminalActivity, toolEvents, sounds, onSounds, onCue,
   microphoneTools, waitingForTap, items, running, onStop, attachments, onAddPictures, onRemovePicture, canRepeat, onRepeat, rate, onRate, steer, onSteer, unknownVoices, onUnknownVoices, ptt, onPtt, holding, onHold }: {
   sessionId: string; folder: string;
   workPhase?: Activity | null;
   canvasOpen: boolean; onCanvasMinimize: () => void; onCanvasToggle: () => void;
+  legacyControls?: boolean;
   title: string; phase: VoicePhase; starting: boolean; muted: boolean; speaking: boolean; musicPlaying?: boolean;
   levels: MutableRefObject<VoiceLevels>; transcript: string; /** Who spoke it, when the portal could tell (reliable verdicts only are shown). */ speaker?: RtcSpeaker; error: string; onMute: () => void; onEnd: () => void;
   browserAvailable: boolean; browserActivity: number; terminalActivity: number; toolEvents: PortalEvent[]; sounds: boolean; onSounds: () => void; onCue: (kind: VoiceCue) => void;
@@ -185,27 +186,27 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   const hint = (id: ActionId) => bindings[id] ? ` (${describe(bindings[id], layout)})` : "";
   const step = (by: number) => {
     const at = VOICE_RATES.indexOf(rate), next = VOICE_RATES[Math.min(VOICE_RATES.length - 1, Math.max(0, (at < 0 ? 0 : at) + by))];
-    if (next === rate) return false;
+    if (!legacyControls || next === rate) return false;
     onRate(next); return true;
   };
   const actions: Partial<Record<ActionId, () => boolean | void>> = {
     "voice.mute": () => { if (ptt || starting) return false; onMute(); },
     // Stops the agent while it works; with nothing running, ends voice mode.
     "voice.stop": () => { if (running) onStop(); else onEnd(); },
-    "voice.picture": () => { picker.current?.click(); },
-    "voice.repeat": () => { if (!canRepeat || speaking) return false; onRepeat(); },
+    "voice.picture": () => { if (!legacyControls) return false; picker.current?.click(); },
+    "voice.repeat": () => { if (!legacyControls || !canRepeat || speaking) return false; onRepeat(); },
     "voice.conversation": () => { if (!conversation) onCue("focus"); setConversation(v => !v); },
     "voice.canvas": () => { onCanvasToggle(); },
     "voice.files": () => { if (filesShown) setFilesShown(false); else openFiles(); },
     "voice.pictures": () => { if (picturesShown) setPicturesShown(false); else if (pictures.length) openPictures(); else return false; },
     "voice.terminal": () => { if (terminalShown) setTerminalShown(false); else openTerminal(); },
     "voice.browser": () => { if (shown) minimize(); else if (browserAvailable || loaded) open(); else return false; },
-    "voice.settings": () => { setSettings(v => !v); },
+    "voice.settings": () => { if (!legacyControls) return false; setSettings(v => !v); },
     "voice.faster": () => step(1),
     "voice.slower": () => step(-1),
-    "voice.steer": () => { onSteer(!steer); },
-    "voice.ptt": () => { onPtt(!ptt); },
-    "voice.sounds": () => { onSounds(); },
+    "voice.steer": () => { if (!legacyControls) return false; onSteer(!steer); },
+    "voice.ptt": () => { if (!legacyControls) return false; onPtt(!ptt); },
+    "voice.sounds": () => { if (!legacyControls) return false; onSounds(); },
   };
   const maximized = browserMax && shown;
   const keys = useRef({ bindings, actions, ptt, onHold, maximized }); keys.current = { bindings, actions, ptt, onHold, maximized };
@@ -373,7 +374,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
     return () => { cancelAnimationFrame(frame); document.removeEventListener("panel-resize", place); root.removeEventListener("transitionend", settled); observer.disconnect(); };
   }, [placing]);
   const drop = (e: DragEvent) => {
-    if (e.defaultPrevented || !e.dataTransfer.types.includes("Files")) return;
+    if (!legacyControls || e.defaultPrevented || !e.dataTransfer.types.includes("Files")) return;
     // Portaled from inside Chat's form, it would bubble on to the form's own drop.
     e.preventDefault(); e.stopPropagation(); setDropping(false);
     add.current([...e.dataTransfer.files]);
@@ -403,11 +404,11 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
         {pictures.length > 0 && !picturesShown && <button type="button" onClick={openPictures} title={`${t("Show pictures")}${hint("voice.pictures")}`} aria-label={t("Show pictures")}><LuImage /></button>}
         {(browserAvailable || loaded) && !shown && <button type="button" onClick={open} title={`${t("Show browser")}${hint("voice.browser")}`} aria-label={t("Show browser")}><LuGlobe /></button>}
         {!terminalShown && <button type="button" aria-label={t("Show terminal")} title={`${t("Show terminal")}${hint("voice.terminal")}`} onClick={openTerminal}><LuTerminal /></button>}
-        <button ref={settingsToggle} type="button" data-voice-settings-toggle onClick={() => setSettings(v => !v)} title={`${t("Voice settings")}${hint("voice.settings")}`} aria-label={t("Voice settings")} aria-expanded={settings}><LuSlidersHorizontal /></button>
+        {legacyControls && <button ref={settingsToggle} type="button" data-voice-settings-toggle onClick={() => setSettings(v => !v)} title={`${t("Voice settings")}${hint("voice.settings")}`} aria-label={t("Voice settings")} aria-expanded={settings}><LuSlidersHorizontal /></button>}
       </div>
-      {settings && <VoiceSettings anchor={settingsToggle} sounds={sounds} onSounds={onSounds} rate={rate} onRate={onRate} steer={steer} onSteer={onSteer} unknownVoices={unknownVoices} onUnknownVoices={onUnknownVoices} ptt={ptt} onPtt={onPtt} onClose={() => setSettings(false)} />}
+      {legacyControls && settings && <VoiceSettings anchor={settingsToggle} sounds={sounds} onSounds={onSounds} rate={rate} onRate={onRate} steer={steer} onSteer={onSteer} unknownVoices={unknownVoices} onUnknownVoices={onUnknownVoices} ptt={ptt} onPtt={onPtt} onClose={() => setSettings(false)} />}
     </header>
-    {attachments.length > 0 && <div className="voice-attachments" role="group" aria-label={t("Pictures for your next message")}>
+    {legacyControls && attachments.length > 0 && <div className="voice-attachments" role="group" aria-label={t("Pictures for your next message")}>
       <div>{attachments.map(a => <figure key={a.id}>
         <img src={a.data} alt={a.name} />
         <button type="button" aria-label={t("Remove {name}", { name: a.name })} title={t("Remove")} onClick={() => onRemovePicture(a.id)}><LuX /></button>
@@ -466,8 +467,10 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
               onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); onHold(true); }}
               onPointerUp={() => onHold(false)} onPointerCancel={() => onHold(false)} onContextMenu={e => e.preventDefault()}><LuMic /></button>
           : <button type="button" className={`voice-stage-action ${muted ? "is-muted" : ""}`} title={`${muted ? t('Unmute microphone') : t('Mute microphone')}${hint('voice.mute')}`} aria-label={muted ? t("Unmute microphone") : t("Mute microphone")} aria-pressed={muted} disabled={starting} onClick={onMute}><LuMicOff className={muted ? '' : 'hidden'} /><LuMic className={muted ? 'hidden' : ''} /></button>}
+        {legacyControls && <>
         <button type="button" className={`voice-stage-action ${attachments.length ? "has-pictures" : ""}`} title={`${t("Add a picture")}${hint("voice.picture")}`} aria-label={t("Add a picture")} disabled={starting} onClick={() => picker.current?.click()}><LuImagePlus />{attachments.length > 0 && <i>{attachments.length}</i>}</button>
         <button type="button" className="voice-stage-action" title={`${t("Repeat the last reply")}${hint("voice.repeat")}`} aria-label={t("Repeat the last reply")} disabled={starting || !canRepeat || speaking} onClick={onRepeat}><LuRotateCcw /></button>
+        </>}
         {running && <button type="button" className="voice-stage-action voice-stop" title={`${t("Stop what the agent is doing")}${hint("voice.stop")}`} aria-label={t("Stop the agent")} onClick={onStop}><LuSquare /></button>}
         <button ref={end} type="button" className="voice-stage-action voice-end" title={`${t("End voice mode")}${hint("voice.toggle")}${running || !bindings["voice.stop"] ? "" : ` ${t("or {keys}", { keys: describe(bindings["voice.stop"], layout) })}`}`} aria-label={t("End voice mode")} onClick={onEnd}><LuX /></button>
       </div>

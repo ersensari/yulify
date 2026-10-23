@@ -2444,7 +2444,12 @@ class SessionManager extends EventEmitter {
     return client.getDuplexToolSchemas();
   }
 
-  /** Run one validated Ultravox tool through the same wrapped SDK definitions and guard hooks as Pi. */
+  async duplexInstructions(sessionId: string): Promise<string> {
+    const client = await this.ensureClient(sessionId);
+    return client.getDuplexInstructions ? client.getDuplexInstructions() : "";
+  }
+
+  /** Run one validated Gemma voice tool through the same wrapped SDK definitions and guard hooks as Pi. */
   async executeDuplexTool(sessionId: string, name: string, args: unknown, callId: string, signal: AbortSignal, onUpdate?: (update: unknown) => void) {
     if (!getSession(sessionId)) throw new Error("Chat session not found.");
     if (this.duplexToolsRunning.has(sessionId) || this.prompting.has(sessionId) || this.isBusy(sessionId) || this.compacting.has(sessionId) || this.editing.has(sessionId)) {
