@@ -39,7 +39,12 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
-            if (event.type === "session.status") onStatus?.(String(event.status || "connected") as DuplexRoomState, caption);
+            if (event.type === "session.status") {
+              const next = String(event.status || "connected");
+              onStatus?.(next as DuplexRoomState, captionRef.current);
+              if (next === "connected") setState("connected");
+              if (next === "closed") void stop();
+            }
             if (event.type === "assistant.text.delta" && typeof event.text === "string") {
               const id = String(event.response_id ?? "");
               const nextCaption = id && id !== responseId.current ? event.text : captionRef.current + event.text;
@@ -47,7 +52,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
               captionRef.current = nextCaption; setCaption(nextCaption); onStatus?.("connected", nextCaption);
             } else if (event.type === "tool.status" && typeof event.name === "string") setToolActivity(`Using ${event.name}…`);
             else if (event.type === "tool.result" && typeof event.name === "string") setToolActivity(`${event.name}: ${String(event.status ?? "finished")}`);
-            else if (event.type === "session.error" && typeof event.message === "string") setMessage(event.message);
+            else if (event.type === "session.error" && typeof event.message === "string") {
+              setMessage(event.message);
+              if (["duplex_failed", "minicpm_disconnected", "resource_busy", "audio_overflow", "engine_backpressure"].includes(String(event.code))) void stop();
+            }
           },
         });
         room.current = client;
@@ -108,7 +116,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
 
   return <div className="relative flex items-center gap-1">
     {state === "connected" && <button type="button" className="prompt-action" onClick={() => void toggleCamera()} aria-label={camera ? t("Turn camera off") : t("Turn camera on")} title={camera ? t("Camera on · click to turn it off") : t("Camera off · click to opt in")}><LuCamera aria-hidden /></button>}
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start MiniCPM full-duplex voice")} title={t("Start MiniCPM full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" disabled={busy} onClick={() => void stop()} aria-label={t("Stop MiniCPM full-duplex voice")} title={message || t("Stop MiniCPM full-duplex voice")}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start MiniCPM full-duplex voice")} title={t("Start MiniCPM full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop MiniCPM full-duplex voice")} title={message || t("Stop MiniCPM full-duplex voice")}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
       {message || toolActivity || <><span className="font-semibold">MiniCPM · </span>{caption}</>}
     </span>}
