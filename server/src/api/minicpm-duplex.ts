@@ -1,6 +1,6 @@
 import express, { type Router } from "express";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { AccessToken, AgentDispatchClient, RoomServiceClient, TrackSource } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient, RoomServiceClient, TrackSource, ServerError } from "livekit-server-sdk";
 import { nanoid } from "nanoid";
 import { getSession, getVoiceInstructions } from "../db.js";
 import { voiceInstructions, voiceRulesOn } from "../pi/voice-first.js";
@@ -45,17 +45,33 @@ export function minicpmDuplexRouter(): Router {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     if (!getSession(sessionId)) return res.status(404).json({ error: { code: "session_not_found", message: "Chat session not found", retryable: false } });
-    if (active.has(sessionId)) return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an Ultravox voice room. Stop it before reconnecting.", retryable: true } });
-    if (starting || active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Ultravox voice session is busy. Try again after it closes.", retryable: true } });
+    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The Ultravox voice session is busy. Try again after it closes.", retryable: true } });
     if (sessions.isBusy(sessionId)) return res.status(409).json({ error: { code: "chat_busy", message: "Finish the current Yulify chat operation before starting voice tools.", retryable: true } });
     starting = true;
     try {
       // Simple Ultravox trial: voice only; delegation comes in stage two.
       const cfg = liveKitConfig();
-      const room = `yulify-${nanoid(20).toLowerCase()}`;
-      const identity = `browser-${nanoid(16).toLowerCase()}`;
       const rooms = new RoomServiceClient(cfg.serverUrl, cfg.key, cfg.secret);
       const dispatches = new AgentDispatchClient(cfg.serverUrl, cfg.key, cfg.secret);
+      const current = active.get(sessionId);
+      if (current) {
+        // A worker restart leaves the browser in the room with no agent. Check
+        // LiveKit rather than making the owner wait for the six-minute TTL.
+        const found = await rooms.listRooms([current.room]);
+        const participants = found.length ? await rooms.listParticipants(current.room) : [];
+        const hasAgent = participants.some(p => p.kind === 4); // LiveKit ParticipantInfo.Kind.AGENT
+        const recentlyCreated = Date.now() - current.createdAt < 30_000;
+        const heartbeatFresh = Date.now() - current.lastSeenAt < 90_000;
+        if (found.length && (recentlyCreated || (hasAgent && heartbeatFresh))) {
+          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active Ultravox voice room. Stop it before reconnecting.", retryable: true } });
+        }
+        if (found.length) await rooms.deleteRoom(current.room);
+        for (const call of current.calls.values()) call.controller.abort(new Error("Stale voice room replaced."));
+        active.delete(sessionId);
+      }
+      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Ultravox voice session is busy. Try again after it closes.", retryable: true } });
+      const room = `yulify-${nanoid(20).toLowerCase()}`;
+      const identity = `browser-${nanoid(16).toLowerCase()}`;
       await rooms.createRoom({ name: room, emptyTimeout: 60, departureTimeout: 20, maxParticipants: 2 });
       let dispatchId = "";
       try {
@@ -98,14 +114,17 @@ export function minicpmDuplexRouter(): Router {
     const sessionId = String(req.params.id);
     const current = active.get(sessionId);
     if (!current) return res.json({ ok: true });
-    active.delete(sessionId);
+    // A delayed close from an old browser transport must not close its replacement.
+    if (req.body?.room && req.body.room !== current.room) return res.json({ ok: true, replaced: true });
     for (const call of current.calls.values()) call.controller.abort(new Error("Voice room closed."));
     try {
       const cfg = liveKitConfig();
       const rooms = new RoomServiceClient(cfg.serverUrl, cfg.key, cfg.secret);
       const dispatches = new AgentDispatchClient(cfg.serverUrl, cfg.key, cfg.secret);
       await dispatches.deleteDispatch(current.dispatchId, current.room).catch(() => undefined);
-      await rooms.deleteRoom(current.room);
+      try { await rooms.deleteRoom(current.room); }
+      catch (error) { if (!(error instanceof ServerError) || error.code !== "not_found") throw error; }
+      if (active.get(sessionId) === current) active.delete(sessionId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(502).json({ error: { code: "room_close_failed", message: "Ultravox voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });

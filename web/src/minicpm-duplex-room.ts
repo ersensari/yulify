@@ -46,10 +46,19 @@ export class MiniCpmDuplexRoom {
     room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
       try { this.hooks.event?.(JSON.parse(new TextDecoder().decode(payload)) as DuplexRoomEvent); } catch { /* ignore malformed status packets */ }
     });
+    room.on(RoomEvent.ParticipantDisconnected, () => {
+      if (!this.disposed) {
+        this.hooks.state?.("error", "Ses servisi bağlantısı kapandı. Konuşmayı yeniden açabilirsin.");
+        this.hooks.event?.({ type: "session.status", status: "closed" });
+      }
+    });
     room.on(RoomEvent.Reconnecting, () => this.hooks.state?.("reconnecting"));
     room.on(RoomEvent.Reconnected, () => this.hooks.state?.("connected"));
     room.on(RoomEvent.Disconnected, reason => {
-      if (!this.disposed) this.hooks.state?.("error", `LiveKit disconnected${reason ? ` (${reason})` : ""}.`);
+      if (!this.disposed) {
+        this.hooks.state?.("error", `LiveKit disconnected${reason ? ` (${reason})` : ""}.`);
+        this.hooks.event?.({ type: "session.status", status: "closed" });
+      }
     });
     try {
       await room.connect(this.grant.url, this.grant.token, { autoSubscribe: true });
@@ -168,7 +177,7 @@ export class MiniCpmDuplexRoom {
       }
       this.audioElements.clear();
       if (grant) {
-        await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/ultravox/room`, { method: "DELETE", keepalive: true }).catch(() => undefined);
+        await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/ultravox/room`, { method: "DELETE", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room: grant.room }) }).catch(() => undefined);
       }
       this.hooks.state?.("closed");
     }
