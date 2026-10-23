@@ -50,6 +50,8 @@ export class MiniCpmDuplexRoom {
         noiseSuppression: true,
         autoGainControl: true,
       });
+      const microphone = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
+      this.hooks.event?.({ type: "microphone.device", label: microphone?.label || "Default microphone", enabled: microphone?.enabled ?? false });
       this.hooks.state?.("connected");
     } catch (error) {
       await this.close();

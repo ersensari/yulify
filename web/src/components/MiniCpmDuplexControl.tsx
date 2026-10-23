@@ -5,7 +5,7 @@ import { t } from "../i18n";
 import { session } from "../safe-storage";
 
 /** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
-export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void }) {
+export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void }) {
   const room = useRef<MiniCpmDuplexRoom>();
   const release = useRef<(() => void) | undefined>();
   const [state, setState] = useState<DuplexRoomState>("closed");
@@ -15,6 +15,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   const responseId = useRef("");
   const captionRef = useRef("");
   const [camera, setCamera] = useState(false);
+  const [microphoneLabel, setMicrophoneLabel] = useState("");
   const muted = useRef(false);
   const musicPaused = useRef(false);
   const busy = state === "connecting" || state === "reconnecting";
@@ -22,11 +23,12 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   const stop = async () => {
     release.current?.(); release.current = undefined;
     if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
+    if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
     onModeChange?.(false); onMuteControl?.(null);
     const current = room.current; room.current = undefined;
     await current?.close();
     setCamera(false);
-    setState("closed");
+    setState("closed"); onInputLevel?.(0);
   };
 
   const start = () => {
@@ -39,6 +41,8 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
+            if (event.type === "microphone.device" && typeof event.label === "string") setMicrophoneLabel(event.label);
+            if (event.type === "microphone.level" && typeof event.level === "number") onInputLevel?.(Math.max(0, Math.min(1, event.level)));
             if (event.type === "session.status") {
               const next = String(event.status || "connected");
               onStatus?.(next as DuplexRoomState, captionRef.current);
@@ -60,6 +64,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         });
         room.current = client;
         session.set("voiceActive", sessionId);
+        session.set("voiceDuplexActive", sessionId);
         onModeChange?.(true);
         const toggleMute = () => { muted.current = !muted.current; void client.setMicrophoneEnabled(!muted.current && !musicPaused.current); onMutedChange?.(muted.current); };
         onMuteControl?.(toggleMute);
@@ -70,6 +75,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         await current?.close();
         release.current?.(); release.current = undefined;
         if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
+    if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
         onModeChange?.(false); onMuteControl?.(null);
         setMessage((error as Error).message);
         setState("error");
@@ -107,6 +113,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     release.current?.(); release.current = undefined;
     void room.current?.close(); room.current = undefined;
     if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
+    if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
   }, [sessionId]);
 
   const toggleCamera = async () => {
@@ -116,7 +123,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
 
   return <div className="relative flex items-center gap-1">
     {state === "connected" && <button type="button" className="prompt-action" onClick={() => void toggleCamera()} aria-label={camera ? t("Turn camera off") : t("Turn camera on")} title={camera ? t("Camera on · click to turn it off") : t("Camera off · click to opt in")}><LuCamera aria-hidden /></button>}
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start MiniCPM full-duplex voice")} title={t("Start MiniCPM full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop MiniCPM full-duplex voice")} title={message || t("Stop MiniCPM full-duplex voice")}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start MiniCPM full-duplex voice")} title={t("Start MiniCPM full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop MiniCPM full-duplex voice")} title={message || `${t("Stop MiniCPM full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
       {message || toolActivity || <><span className="font-semibold">MiniCPM · </span>{caption}</>}
     </span>}
