@@ -126,8 +126,20 @@ The toggle on each row sets `disabled: true` — the server stays configured and
 visible but is never connected. Better than deleting a server you are debugging.
 Deleting one, or renaming it, also takes its tools out of the Tools list, and a
 chat still running with it has them off from then on, as with one switched off —
-whatever took it out of the file, this panel or switching a feature such as
-Understory off.
+whatever took it out of the file: this panel, switching a feature such as
+Understory off, or an edit made by hand. The portal remembers which servers it
+last saw in the file, so an edit made by hand is noticed the next time the tools
+are listed or a chat starts, and one made while the portal was stopped when it
+starts again. A file that cannot be read takes nothing out, and nor does one that
+is not there, as for a moment while an editor or a script puts a new one in its
+place: the file there next is compared with the servers last seen, so a file
+deleted for good takes its servers out once a new one is written. Only this
+file's servers count: one the adapter loads from a project's own `.mcp.json` or
+from anywhere else is not judged, though where its name is that of a server
+taken out of this file, or starts with it and an underscore, its tools are taken
+for that server's. The first time the portal looks at the file it has nothing to
+compare it with, so a tool left behind by a server taken out by hand before then
+stays listed, until it is removed from `tools_seen` in the portal's database.
 
 ::: tip The adapter has its own commands
 `/mcp` opens its status panel, `/mcp tools` lists what is available, and
