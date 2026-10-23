@@ -56,8 +56,10 @@ test('the data folder PORTAL_DATA_DIR names is mounted by both Compose files, an
 
 test('the upgrade guide warns a Portainer stack that sets PORTAL_DATA_DIR, which the first release ignored', () => {
   const guide = read('docs/guide/upgrading.md');
-  const section = guide.slice(guide.indexOf('## Upgrading from the first release'));
-  assert.match(section, /Portainer stack[\s\S]*PORTAL_DATA_DIR[\s\S]*<stack>_pithagoras-data/, 'the first-release section names the stack, the variable and the old volume');
+  const from = guide.indexOf('## Upgrading to 0.1.0 from an earlier build');
+  assert.ok(from >= 0, 'the guide has a section for builds from before 0.1.0');
+  const section = guide.slice(from);
+  assert.match(section, /Portainer stack[\s\S]*PORTAL_DATA_DIR[\s\S]*<stack>_pithagoras-data/, 'the section for builds from before 0.1.0 names the stack, the variable and the old volume');
   // The old home of the data is what the warning tells people to copy from.
   assert.match(read('docker-compose.portainer.yml'), /\$\{PORTAL_DATA_DIR:-pithagoras-data\}:\/data/);
 });
@@ -269,6 +271,28 @@ test('the build context leaves out local data and what the image builds itself, 
   const copied = [...dockerfile().matchAll(/^COPY (?!--from)(.+) \S+$/gm)].flatMap((m) => m[1].split(/\s+/));
   assert.ok(copied.includes('THIRD_PARTY_NOTICES.md') && copied.includes('package-lock.json') && copied.includes('core'));
   for (const source of copied) for (const pattern of ignored) assert.ok(!matches(pattern, source), `${source} is copied but ${pattern} leaves it out`);
+});
+
+// The server moved from server/ to core/server (#198). A service, the restart after an update, or a container's
+// `node server/dist/reset-password.js` that still names the old place starts the same file from the new one.
+test('a start file in the old server/dist runs the same file in core/server/dist, with its arguments, and the image has them', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pithagoras-old-entries-'));
+  try {
+    mkdirSync(path.join(dir, 'scripts'));
+    writeFileSync(path.join(dir, 'scripts', 'old-entries.mjs'), read('scripts/old-entries.mjs'));
+    mkdirSync(path.join(dir, 'core', 'server', 'dist'), { recursive: true });
+    writeFileSync(path.join(dir, 'core', 'server', 'package.json'), read('core/server/package.json'));
+    const entries = ['index.js', 'reset-password.js', 'sso-only-off.js'];
+    for (const entry of entries) writeFileSync(path.join(dir, 'core', 'server', 'dist', entry), `console.log("core/server/dist/${entry}", process.argv.slice(2).join(" "));\n`);
+    execFileSync(process.execPath, [path.join(dir, 'scripts', 'old-entries.mjs')], { stdio: 'ignore' });
+    for (const entry of entries) {
+      assert.equal(execFileSync(process.execPath, [path.join(dir, 'server', 'dist', entry), '--yes'], { encoding: 'utf8' }), `core/server/dist/${entry} --yes\n`, entry);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.match(read('package.json'), /"build": "[^"]*&& node scripts\/old-entries\.mjs"/, 'the build writes them');
+  assert.match(dockerfile(), /^COPY --from=build \/app\/server\/dist server\/dist$/m, 'the image has them');
 });
 
 test('the README of the channels folder says what the folder is and points at the guide, with no second copy of the contract to go stale', () => {
