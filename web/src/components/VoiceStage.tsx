@@ -6,7 +6,7 @@ import { useWorkPanels } from "../use-work-panels";
 import { FilesPanel } from "./FilesPanel";
 import { keepFileActivity, latestFileActivity, type FileActivity } from "../file-activity";
 import { VoiceToolActivity } from "./VoiceToolActivity";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type MutableRefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type MutableRefObject, type ReactNode } from "react";
 import type { Item } from "../transcript";
 import { LuMic, LuMicOff, LuX, LuGlobe, LuMaximize2, LuMinimize2, LuMinus, LuTerminal, LuFileText, LuFolderOpen, LuImage, LuImagePlus, LuRotateCcw, LuSquare, LuMessageSquareText, LuSlidersHorizontal } from "react-icons/lu";
 import { VoicePictures, shownPictures } from "./VoicePictures";
@@ -51,7 +51,7 @@ const watchWide = (changed: () => void) => {
 const editing = (target: EventTarget | null) => !!(target as Element | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
 
 export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasMinimize, onCanvasToggle, title, phase, starting, muted, speaking, musicPlaying, levels, error, transcript, speaker, onMute, onEnd, browserAvailable, browserActivity, terminalActivity, toolEvents, sounds, onSounds, onCue,
-  waitingForTap, items, running, onStop, attachments, onAddPictures, onRemovePicture, canRepeat, onRepeat, rate, onRate, steer, onSteer, unknownVoices, onUnknownVoices, ptt, onPtt, holding, onHold }: {
+  microphoneTools, waitingForTap, items, running, onStop, attachments, onAddPictures, onRemovePicture, canRepeat, onRepeat, rate, onRate, steer, onSteer, unknownVoices, onUnknownVoices, ptt, onPtt, holding, onHold }: {
   sessionId: string; folder: string;
   workPhase?: Activity | null;
   canvasOpen: boolean; onCanvasMinimize: () => void; onCanvasToggle: () => void;
@@ -60,6 +60,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   browserAvailable: boolean; browserActivity: number; terminalActivity: number; toolEvents: PortalEvent[]; sounds: boolean; onSounds: () => void; onCue: (kind: VoiceCue) => void;
   /** Back after a reload, and waiting for a tap before audio may start. */
   waitingForTap?: boolean;
+  microphoneTools?: ReactNode;
   items: Item[]; running: boolean; onStop: () => void;
   /** Pictures waiting to go with the next thing said. */
   attachments: Attachment[]; onAddPictures: (files: File[]) => void; onRemovePicture: (id: string) => void;
@@ -458,6 +459,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
       {!anyPanel && transcript && (input || holding || phase === "Transcribing") && <p className="voice-live-transcript" role="group" aria-label={t("Live transcription")}>{transcript}</p>}
       {speaker?.reliable && <p className={`voice-speaker${speaker.matched && speaker.name ? "" : " is-unknown"}`} role="status" aria-label={t("Speaker")}>{speaker.matched && speaker.name ? speaker.name.charAt(0).toUpperCase() + speaker.name.slice(1) : unknownVoices === "enrolled" ? t("Unknown voice, ignored") : t("Unknown voice")}</p>}
 
+      {microphoneTools}
       <div className="voice-stage-controls">
         {ptt
           ? <button type="button" className={`voice-stage-action voice-hold ${holding ? "is-holding" : ""}`} title={`${t("Hold to talk")}${touch ? "" : hint("voice.hold")}`} aria-label={t("Hold to talk")} aria-pressed={holding} disabled={starting}

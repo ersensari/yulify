@@ -15,11 +15,15 @@ export class MiniCpmDuplexRoom {
   private grant?: RoomGrant;
   private audioElements = new Set<HTMLMediaElement>();
   private disposed = false;
+  private stopMeter?: () => void;
+  private meterContext?: AudioContext;
 
   constructor(private readonly sessionId: string, private readonly hooks: DuplexRoomHooks = {}) {}
 
   async connect(): Promise<void> {
     this.disposed = false;
+    this.meterContext = new AudioContext();
+    void this.meterContext.resume().catch(() => undefined);
     this.hooks.state?.("connecting");
     const response = await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/minicpm/room`, { method: "POST" });
     const body = await response.json().catch(() => ({}));
@@ -46,12 +50,12 @@ export class MiniCpmDuplexRoom {
     try {
       await room.connect(this.grant.url, this.grant.token, { autoSubscribe: true });
       await room.localParticipant.setMicrophoneEnabled(true, {
+        channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
       });
-      const microphone = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
-      this.hooks.event?.({ type: "microphone.device", label: microphone?.label || "Default microphone", enabled: microphone?.enabled ?? false });
+      await this.monitorMicrophone();
       this.hooks.state?.("connected");
     } catch (error) {
       await this.close();
@@ -61,7 +65,46 @@ export class MiniCpmDuplexRoom {
 
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (!this.room) throw new Error("MiniCPM voice is not connected");
-    await this.room.localParticipant.setMicrophoneEnabled(enabled, { echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    await this.room.localParticipant.setMicrophoneEnabled(enabled, { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+  }
+
+  /** Reacquire the existing input without restarting the model or room. */
+  async reconnectMicrophone(): Promise<void> {
+    void this.meterContext?.resume().catch(() => undefined);
+    const room = this.room;
+    const track = room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack;
+    if (!room || !track) throw new Error("Microphone track is unavailable");
+    const settings = track.mediaStreamTrack.getSettings();
+    const devices = await Room.getLocalDevices("audioinput", false);
+    const hardware = devices.find(device => device.deviceId !== "default" && device.deviceId !== "communications" && device.groupId === settings.groupId);
+    await track.restartTrack({ deviceId: hardware?.deviceId || settings.deviceId, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    await this.monitorMicrophone();
+  }
+
+  private async monitorMicrophone(): Promise<void> {
+    this.stopMeter?.(); this.stopMeter = undefined;
+    const room = this.room;
+    const microphone = room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
+    if (!room || !microphone) return;
+    const context = this.meterContext ??= new AudioContext();
+    const source = context.createMediaStreamSource(new MediaStream([microphone]));
+    const analyser = context.createAnalyser(); analyser.fftSize = 2048;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    let sentAt = 0;
+    const timer = window.setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+      const event = { type: "microphone.capture", label: microphone.label, level: Math.min(1, rms * 7), rms, enabled: microphone.enabled, muted: microphone.muted, readyState: microphone.readyState, audioContext: context.state };
+      this.hooks.event?.(event);
+      if (Date.now() - sentAt >= 5000) {
+        sentAt = Date.now();
+        void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(event)), { reliable: true, topic: "yulify.microphone" }).catch(() => undefined);
+      }
+    }, 200);
+    this.stopMeter = () => { window.clearInterval(timer); source.disconnect(); analyser.disconnect(); };
+    this.hooks.event?.({ type: "microphone.device", label: microphone.label, enabled: microphone.enabled });
+    void context.resume().catch(() => undefined);
   }
 
   /** Camera is opt-in. Calling this explicitly creates the camera track. */
@@ -72,6 +115,8 @@ export class MiniCpmDuplexRoom {
 
   async close(): Promise<void> {
     this.disposed = true;
+    this.stopMeter?.(); this.stopMeter = undefined;
+    void this.meterContext?.close(); this.meterContext = undefined;
     const room = this.room;
     const grant = this.grant;
     this.room = undefined;

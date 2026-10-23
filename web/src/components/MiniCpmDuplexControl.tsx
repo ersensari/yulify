@@ -5,7 +5,7 @@ import { t } from "../i18n";
 import { session } from "../safe-storage";
 
 /** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
-export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void }) {
+export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void }) {
   const room = useRef<MiniCpmDuplexRoom>();
   const release = useRef<(() => void) | undefined>();
   const [state, setState] = useState<DuplexRoomState>("closed");
@@ -24,7 +24,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     release.current?.(); release.current = undefined;
     if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
-    onModeChange?.(false); onMuteControl?.(null);
+    onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
     const current = room.current; room.current = undefined;
     await current?.close();
     setCamera(false);
@@ -42,7 +42,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
             if (event.type === "microphone.device" && typeof event.label === "string") setMicrophoneLabel(event.label);
-            if (event.type === "microphone.level" && typeof event.level === "number") onInputLevel?.(Math.max(0, Math.min(1, event.level)));
+            if (event.type === "microphone.capture" && typeof event.level === "number") {
+              onInputLevel?.(Math.max(0, Math.min(1, event.level)));
+              onCaptureStatus?.({label: String(event.label || "Default microphone"), level: event.level, muted: event.enabled !== true || event.muted === true});
+            }
             if (event.type === "session.status") {
               const next = String(event.status || "connected");
               onStatus?.(next as DuplexRoomState, captionRef.current);
@@ -68,6 +71,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         onModeChange?.(true);
         const toggleMute = () => { muted.current = !muted.current; void client.setMicrophoneEnabled(!muted.current && !musicPaused.current); onMutedChange?.(muted.current); };
         onMuteControl?.(toggleMute);
+        onReconnectControl?.(async () => {
+          try { await client.reconnectMicrophone(); await client.setMicrophoneEnabled(!muted.current && !musicPaused.current); }
+          catch (error) { setMessage((error as Error).message); }
+        });
         await client.connect();
         await client.setMicrophoneEnabled(!muted.current && !musicPaused.current);
       } catch (error) {
@@ -76,7 +83,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         release.current?.(); release.current = undefined;
         if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
-        onModeChange?.(false); onMuteControl?.(null);
+        onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
         setMessage((error as Error).message);
         setState("error");
       }
