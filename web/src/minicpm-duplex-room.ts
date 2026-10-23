@@ -1,4 +1,4 @@
-import { Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication, type RemoteParticipant } from "livekit-client";
+import { createLocalAudioTrack, Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication, type RemoteParticipant } from "livekit-client";
 
 export type DuplexRoomState = "connecting" | "connected" | "reconnecting" | "closed" | "error";
 export type DuplexRoomEvent = Record<string, unknown> & { type?: string };
@@ -17,6 +17,8 @@ export class MiniCpmDuplexRoom {
   private disposed = false;
   private stopMeter?: () => void;
   private meterContext?: AudioContext;
+  private microphoneEnabled = true;
+  private recovery?: Promise<void>;
 
   constructor(private readonly sessionId: string, private readonly hooks: DuplexRoomHooks = {}) {}
 
@@ -65,20 +67,40 @@ export class MiniCpmDuplexRoom {
 
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (!this.room) throw new Error("MiniCPM voice is not connected");
+    this.microphoneEnabled = enabled;
     await this.room.localParticipant.setMicrophoneEnabled(enabled, { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
   }
 
-  /** Reacquire the existing input without restarting the model or room. */
+  /** Replace a stopped capture/publication, without restarting the model or room. */
   async reconnectMicrophone(): Promise<void> {
     void this.meterContext?.resume().catch(() => undefined);
+    if (this.recovery) return this.recovery;
+    const work = this.replaceMicrophone();
+    this.recovery = work;
+    try { await work; } finally { if (this.recovery === work) this.recovery = undefined; }
+  }
+
+  private async replaceMicrophone(): Promise<void> {
     const room = this.room;
-    const track = room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack;
-    if (!room || !track) throw new Error("Microphone track is unavailable");
-    const settings = track.mediaStreamTrack.getSettings();
+    if (!room || this.disposed) throw new Error("MiniCPM voice is not connected");
+    const old = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack;
+    const settings = old?.mediaStreamTrack.getSettings();
     const devices = await Room.getLocalDevices("audioinput", false);
-    const hardware = devices.find(device => device.deviceId !== "default" && device.deviceId !== "communications" && device.groupId === settings.groupId);
-    await track.restartTrack({ deviceId: hardware?.deviceId || settings.deviceId, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
-    await this.monitorMicrophone();
+    const hardware = settings?.groupId ? devices.find(device => device.deviceId !== "default" && device.deviceId !== "communications" && device.groupId === settings.groupId) : undefined;
+    const deviceId = hardware?.deviceId || settings?.deviceId;
+    this.stopMeter?.(); this.stopMeter = undefined;
+    if (old) {
+      try { await room.localParticipant.unpublishTrack(old, true); }
+      finally { old.stop(); }
+    }
+    const fresh = await createLocalAudioTrack({ deviceId, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    try {
+      if (this.disposed || this.room !== room) throw new Error("Voice closed during microphone recovery");
+      if (!this.microphoneEnabled) await fresh.mute();
+      await room.localParticipant.publishTrack(fresh, { source: Track.Source.Microphone });
+      if (fresh.mediaStreamTrack.readyState !== "live") throw new Error("The microphone closed while being opened");
+      await this.monitorMicrophone();
+    } catch (error) { fresh.stop(); throw error; }
   }
 
   private async monitorMicrophone(): Promise<void> {
@@ -97,6 +119,7 @@ export class MiniCpmDuplexRoom {
       const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
       const event = { type: "microphone.capture", label: microphone.label, level: Math.min(1, rms * 7), rms, enabled: microphone.enabled, muted: microphone.muted, readyState: microphone.readyState, audioContext: context.state };
       this.hooks.event?.(event);
+      if (microphone.readyState === "ended") this.hooks.event?.({ type: "microphone.error", message: "Mikrofon akışı kapandı. Mikrofonu yeniden bağla düğmesini kullan." });
       if (Date.now() - sentAt >= 5000) {
         sentAt = Date.now();
         void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(event)), { reliable: true, topic: "yulify.microphone" }).catch(() => undefined);

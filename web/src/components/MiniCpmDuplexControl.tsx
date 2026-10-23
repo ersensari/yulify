@@ -5,7 +5,7 @@ import { t } from "../i18n";
 import { session } from "../safe-storage";
 
 /** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
-export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void }) {
+export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onError }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onError?: (message: string) => void }) {
   const room = useRef<MiniCpmDuplexRoom>();
   const release = useRef<(() => void) | undefined>();
   const [state, setState] = useState<DuplexRoomState>("closed");
@@ -33,7 +33,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
 
   const start = () => {
     if (room.current || disabled) return;
-    setMessage("");
+    setMessage(""); onError?.("");
     setCaption(""); captionRef.current = "";
     setToolActivity("");
     const run = async () => {
@@ -41,6 +41,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
+            if (event.type === "microphone.error" && typeof event.message === "string") onError?.(event.message);
             if (event.type === "microphone.device" && typeof event.label === "string") setMicrophoneLabel(event.label);
             if (event.type === "microphone.capture" && typeof event.level === "number") {
               onInputLevel?.(Math.max(0, Math.min(1, event.level)));
@@ -72,8 +73,11 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         const toggleMute = () => { muted.current = !muted.current; void client.setMicrophoneEnabled(!muted.current && !musicPaused.current); onMutedChange?.(muted.current); };
         onMuteControl?.(toggleMute);
         onReconnectControl?.(async () => {
-          try { await client.reconnectMicrophone(); await client.setMicrophoneEnabled(!muted.current && !musicPaused.current); }
-          catch (error) { setMessage((error as Error).message); }
+          try {
+            onError?.(""); setMessage("");
+            await client.reconnectMicrophone();
+            await client.setMicrophoneEnabled(!muted.current && !musicPaused.current);
+          } catch (error) { const message = (error as Error).message; setMessage(message); onError?.(message); }
         });
         await client.connect();
         await client.setMicrophoneEnabled(!muted.current && !musicPaused.current);
