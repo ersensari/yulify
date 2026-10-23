@@ -46,6 +46,15 @@ function liveKitConfig() {
 /** Authenticated room issuance for the dedicated Gemma E4B LiveKit voice worker. */
 export function minicpmDuplexRouter(): Router {
   const router = express.Router();
+  router.get("/sessions/:id/voice/gemma4/capabilities", async (req, res) => {
+    const id = String(req.params.id);
+    if (!getSession(id)) return res.status(404).json({ error: "Chat session not found" });
+    try {
+      const tools = await sessions.duplexToolSchemas(id);
+      return res.json({ tools: tools.map(tool => tool.name), schema_bytes: Buffer.byteLength(JSON.stringify(tools)), music_skill: !!(await sessions.duplexInstructions(id)) });
+    } catch (error) { return res.status(503).json({ error: (error as Error).message }); }
+  });
+
   router.post("/sessions/:id/voice/gemma4/room", async (req, res) => {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);

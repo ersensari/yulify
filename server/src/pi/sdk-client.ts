@@ -47,6 +47,8 @@ interface Handoff {
 
 const DUPLEX_NATIVE_TOOLS = new Set([
   "end_voice_conversation", "control_music_player", "web_search", "fetch_content",
+  "browser_navigate", "browser_back", "browser_snapshot", "browser_find", "browser_get_text",
+  "browser_click", "browser_type", "browser_select", "browser_key", "browser_scroll", "browser_screenshot",
   "canvas_list", "canvas_create", "canvas_read", "canvas_write", "canvas_delete", "get_search_content", "source_check",
 ]);
 const duplexToolAllowed = (name: string, definition?: any) => DUPLEX_NATIVE_TOOLS.has(name) || name === "mcp" || /^MCP: /.test(definition?.label ?? "");
@@ -1303,7 +1305,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       if (!name || !active.has(name) || this.switchedOff.has(name) || (this.wanted.size > 0 && !this.wanted.has(name))) continue;
       // Gemma uses session-authorized MCP, web/canvas/client controls and Strata delegation.
       // Pi shell, file, image and other native tools are intentionally not exposed here.
-      if (name !== "subagent" && !duplexToolAllowed(name, tool)) continue;
+      if (name !== "subagent" && !duplexToolAllowed(name, this.session.getToolDefinition?.(name) ?? tool)) continue;
       if (name === "subagent") {
         schemas.push({
           name: "ask_strata",
@@ -1317,13 +1319,21 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       schemas.push({ name, description: String(tool.description ?? tool.label ?? name), parameters: JSON.parse(JSON.stringify(parameters)) });
       if (schemas.length > 48) throw new Error("Too many active tools for the duplex context; turn off tools this chat does not need.");
     }
-    // Large mail/calendar schemas are discovered through the active MCP gateway.
-    // Keep complete schemas for voice/music/memory/web/canvas and delegation.
-    let offered = schemas;
-    if (Buffer.byteLength(JSON.stringify(offered), "utf8") > 32_000 && schemas.some(schema => schema.name === "mcp")) {
-      offered = schemas.filter(schema => schema.name === "ask_strata" || schema.name === "mcp" || DUPLEX_NATIVE_TOOLS.has(schema.name) || /^(music|mem0|understory)_/.test(schema.name));
+    // Complete schemas, packed by capability priority; never truncate parameters.
+    // Optional native work goes to ask_strata, optional MCP work to mcp discovery.
+    const priority = ["music_generate_music", "web_search", "browser_navigate", "control_music_player", "end_voice_conversation", "ask_strata", "browser_get_text", "browser_find", "mcp", "music_get_music_job", "music_get_music_artifact", "music_get_music_parameters", "browser_click", "browser_type", "browser_scroll", "canvas_create", "canvas_read", "canvas_write", "canvas_list", "get_search_content"];
+    const ordered = [...schemas].sort((a, b) => {
+      const rank = (name: string) => { const at = priority.indexOf(name); return at < 0 ? priority.length : at; };
+      return rank(a.name) - rank(b.name);
+    });
+    const offered: DuplexToolSchema[] = [];
+    for (const schema of ordered) {
+      if (Buffer.byteLength(JSON.stringify([...offered, schema]), "utf8") <= 32_000) offered.push(schema);
     }
-    if (Buffer.byteLength(JSON.stringify(offered), "utf8") > 32_000) throw new Error("Active voice tools exceed the context budget; turn off unused tools.");
+    const essential = ["music_generate_music", "web_search", "browser_navigate", "ask_strata"];
+    const missing = essential.filter(name => schemas.some(schema => schema.name === name) && !offered.some(schema => schema.name === name));
+    if (missing.length) throw new Error(`Voice core tool schemas exceed the budget: ${missing.join(", ")}`);
+
     return offered;
   }
 
