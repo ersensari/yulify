@@ -132,6 +132,7 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
   const cleaned = useRef<Suppressed | undefined>(undefined);
   const [speaking, setSpeaking] = useState(false);
   const [duplexActive, setDuplexActive] = useState(false);
+  const [duplexHearing, setDuplexHearing] = useState(false);
   const [duplexMuted, setDuplexMuted] = useState(false);
   const [duplexCaption, setDuplexCaption] = useState("");
   const [duplexState, setDuplexState] = useState("closed");
@@ -869,7 +870,7 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
     {profileOpen&&createPortal(<VoiceProfile profiler={profiler.current!} onClose={()=>{setProfileOpen(false);profiler.current!.close('disabled');}}/>,document.body)}
 
     {(starting || enabled || duplexActive) && stageTarget && createPortal(
-      <VoiceStage sessionId={sessionId} folder={folder} workPhase={work} canvasOpen={canvasOpen} onCanvasMinimize={onCanvasMinimize} onCanvasToggle={onCanvasToggle} title={duplexActive ? `${title} · MiniCPM full duplex` : sequentialMode ? `${title} · ${sentenceMode ? (prefetchMode ? t("Sentence pipeline · buffered audio") : t("Sentence chunks · buffered audio")) : t("Sequential baseline")}` : comparison ? `${title} · ${t("Streaming pipeline")}` : title} phase={duplexActive ? (duplexState === "connected" ? "Listening" : "Thinking") : phase} starting={starting || (duplexActive && duplexState !== "connected")} muted={duplexActive ? duplexMuted : muted} speaking={duplexActive ? false : speaking} musicPlaying={musicPlaying}
+      <VoiceStage sessionId={sessionId} folder={folder} workPhase={work} canvasOpen={canvasOpen} onCanvasMinimize={onCanvasMinimize} onCanvasToggle={onCanvasToggle} title={duplexActive ? `${title} · MiniCPM full duplex` : sequentialMode ? `${title} · ${sentenceMode ? (prefetchMode ? t("Sentence pipeline · buffered audio") : t("Sentence chunks · buffered audio")) : t("Sequential baseline")}` : comparison ? `${title} · ${t("Streaming pipeline")}` : title} phase={duplexActive ? (duplexState === "connected" ? (duplexHearing ? "Hearing you" : "Listening") : "Thinking") : phase} starting={starting || (duplexActive && duplexState !== "connected")} muted={duplexActive ? duplexMuted : muted} speaking={duplexActive ? false : speaking} musicPlaying={musicPlaying}
         browserAvailable={browserAvailable} browserActivity={browserActivity} terminalActivity={terminalActivity} toolEvents={toolEvents} sounds={sounds} onSounds={toggleSounds} onCue={cue}
         levels={levels} transcript={duplexActive ? duplexCaption : transcript} speaker={duplexActive ? undefined : speaker} error={error} onMute={duplexActive ? () => duplexMuteRef.current?.() : toggleMute} onEnd={duplexActive ? () => window.dispatchEvent(new CustomEvent("yulify:end-voice", { detail: { sessionId } })) : endMode} waitingForTap={waitingForTap}
         items={items} running={running} onStop={() => { void latest.current.onAbort().catch(e => setError((e as Error).message)); }}
@@ -882,7 +883,7 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
     )}
     <div className="relative flex items-center gap-1">
       <button type="button" className="prompt-action" aria-label={t("Profile voice latency")} title={t("Profile voice latency")} aria-pressed={profileOpen} onClick={()=>{setProfileOpen(v=>!v);if(profileOpen)profiler.current!.close('disabled');}}><LuGauge/></button>
-      <MiniCpmDuplexControl sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; }} />
+      <MiniCpmDuplexControl sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; setDuplexHearing(value > 0.04); }} />
       {error && !enabled && !starting && <p role="alert" className="absolute bottom-full right-0 mb-3 w-64 rounded-xl border border-line bg-surface p-3 text-xs text-danger shadow-pop">{error}</p>}
       <button ref={startButton} type="button" onClick={() => { void start(); }} aria-label={t("Turn on hands-free voice")} title={bindings["voice.toggle"] ? t("Start voice conversation ({keys})", { keys: describe(bindings["voice.toggle"], layout) }) : t("Start voice conversation")} className="prompt-action">
         {starting ? <LuLoaderCircle aria-hidden className="animate-spin" /> : <LuAudioLines aria-hidden />}
