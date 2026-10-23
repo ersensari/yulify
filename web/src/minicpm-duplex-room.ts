@@ -1,4 +1,4 @@
-import { createLocalAudioTrack, Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication, type RemoteParticipant } from "livekit-client";
+import { LocalAudioTrack, Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication, type RemoteParticipant } from "livekit-client";
 
 export type DuplexRoomState = "connecting" | "connected" | "reconnecting" | "closed" | "error";
 export type DuplexRoomEvent = Record<string, unknown> & { type?: string };
@@ -19,6 +19,8 @@ export class MiniCpmDuplexRoom {
   private meterContext?: AudioContext;
   private microphoneEnabled = true;
   private recovery?: Promise<void>;
+  private microphone?: LocalAudioTrack;
+  private microphoneStream?: MediaStream;
 
   constructor(private readonly sessionId: string, private readonly hooks: DuplexRoomHooks = {}) {}
 
@@ -51,13 +53,7 @@ export class MiniCpmDuplexRoom {
     });
     try {
       await room.connect(this.grant.url, this.grant.token, { autoSubscribe: true });
-      await room.localParticipant.setMicrophoneEnabled(true, {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      });
-      await this.monitorMicrophone();
+      await this.replaceMicrophone();
       this.hooks.state?.("connected");
     } catch (error) {
       await this.close();
@@ -68,7 +64,12 @@ export class MiniCpmDuplexRoom {
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (!this.room) throw new Error("MiniCPM voice is not connected");
     this.microphoneEnabled = enabled;
-    await this.room.localParticipant.setMicrophoneEnabled(enabled, { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    const track = this.microphone;
+    if (!track) return; // Recovery applies the most recent policy before publishing.
+    if (enabled) {
+      if (track.mediaStreamTrack.readyState !== "live") throw new Error("Mikrofon akışı kapalı. Mikrofonu yeniden bağla.");
+      await track.unmute();
+    } else await track.mute();
   }
 
   /** Replace a stopped capture/publication, without restarting the model or room. */
@@ -83,30 +84,45 @@ export class MiniCpmDuplexRoom {
   private async replaceMicrophone(): Promise<void> {
     const room = this.room;
     if (!room || this.disposed) throw new Error("MiniCPM voice is not connected");
-    const old = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack;
-    const settings = old?.mediaStreamTrack.getSettings();
-    const devices = await Room.getLocalDevices("audioinput", false);
-    const hardware = settings?.groupId ? devices.find(device => device.deviceId !== "default" && device.deviceId !== "communications" && device.groupId === settings.groupId) : undefined;
-    const deviceId = hardware?.deviceId || settings?.deviceId;
+    const old = this.microphone;
+    const deviceId = old?.mediaStreamTrack.getSettings().deviceId;
     this.stopMeter?.(); this.stopMeter = undefined;
+    this.microphone = undefined;
     if (old) {
       try { await room.localParticipant.unpublishTrack(old, true); }
       finally { old.stop(); }
     }
-    const fresh = await createLocalAudioTrack({ deviceId, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    this.microphoneStream?.getTracks().forEach(track => track.stop());
+    this.microphoneStream = undefined;
+    // Match the established sequential voice input exactly. The application owns
+    // capture; LiveKit transports a user-provided track without capture defaults.
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      ...(deviceId && deviceId !== "default" ? { deviceId: { ideal: deviceId } } : {}),
+    } });
+    const raw = stream.getAudioTracks()[0];
+    if (!raw) { stream.getTracks().forEach(track => track.stop()); throw new Error("Mikrofon ses akışı oluşturulamadı."); }
+    const fresh = new LocalAudioTrack(raw, raw.getConstraints(), true);
     try {
       if (this.disposed || this.room !== room) throw new Error("Voice closed during microphone recovery");
       if (!this.microphoneEnabled) await fresh.mute();
-      await room.localParticipant.publishTrack(fresh, { source: Track.Source.Microphone });
-      if (fresh.mediaStreamTrack.readyState !== "live") throw new Error("The microphone closed while being opened");
+      await room.localParticipant.publishTrack(fresh, { source: Track.Source.Microphone, stopMicTrackOnMute: false });
+      if (raw.readyState !== "live") throw new Error("The microphone closed while being opened");
+      this.microphone = fresh; this.microphoneStream = stream;
+      // Policy may change while publication is being negotiated.
+      await this.setMicrophoneEnabled(this.microphoneEnabled);
       await this.monitorMicrophone();
-    } catch (error) { fresh.stop(); throw error; }
+    } catch (error) {
+      fresh.stop(); stream.getTracks().forEach(track => track.stop());
+      if (this.microphone === fresh) { this.microphone = undefined; this.microphoneStream = undefined; }
+      throw error;
+    }
   }
 
   private async monitorMicrophone(): Promise<void> {
     this.stopMeter?.(); this.stopMeter = undefined;
     const room = this.room;
-    const microphone = room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
+    const microphone = this.microphone?.mediaStreamTrack;
     if (!room || !microphone) return;
     const context = this.meterContext ??= new AudioContext();
     const source = context.createMediaStreamSource(new MediaStream([microphone]));
@@ -138,6 +154,8 @@ export class MiniCpmDuplexRoom {
 
   async close(): Promise<void> {
     this.disposed = true;
+    this.microphone?.stop(); this.microphone = undefined;
+    this.microphoneStream?.getTracks().forEach(track => track.stop()); this.microphoneStream = undefined;
     this.stopMeter?.(); this.stopMeter = undefined;
     void this.meterContext?.close(); this.meterContext = undefined;
     const room = this.room;
