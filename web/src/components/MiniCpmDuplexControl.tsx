@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LuCamera, LuLoaderCircle, LuMic, LuMicOff } from "react-icons/lu";
+import { LuLoaderCircle, LuMic, LuMicOff } from "react-icons/lu";
 import { MiniCpmDuplexRoom, type DuplexRoomState } from "../minicpm-duplex-room";
 import { t } from "../i18n";
 import { session } from "../safe-storage";
@@ -14,7 +14,6 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   const [toolActivity, setToolActivity] = useState("");
   const responseId = useRef("");
   const captionRef = useRef("");
-  const [camera, setCamera] = useState(false);
   const [microphoneLabel, setMicrophoneLabel] = useState("");
   const muted = useRef(false);
   const musicPaused = useRef(false);
@@ -27,7 +26,6 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
     const current = room.current; room.current = undefined;
     await current?.close();
-    setCamera(false);
     setState("closed"); onInputLevel?.(0);
   };
 
@@ -127,16 +125,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
   }, [sessionId]);
 
-  const toggleCamera = async () => {
-    try { await room.current?.setCamera(!camera); setCamera(value => !value); }
-    catch (error) { setMessage((error as Error).message); }
-  };
-
   return <div className="relative flex items-center gap-1">
-    {state === "connected" && <button type="button" className="prompt-action" onClick={() => void toggleCamera()} aria-label={camera ? t("Turn camera off") : t("Turn camera on")} title={camera ? t("Camera on · click to turn it off") : t("Camera off · click to opt in")}><LuCamera aria-hidden /></button>}
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start MiniCPM full-duplex voice")} title={t("Start MiniCPM full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop MiniCPM full-duplex voice")} title={message || `${t("Stop MiniCPM full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start Ultravox full-duplex voice")} title={t("Start Ultravox full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop Ultravox full-duplex voice")} title={message || `${t("Stop Ultravox full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
-      {message || toolActivity || <><span className="font-semibold">MiniCPM · </span>{caption}</>}
+      {message || toolActivity || <><span className="font-semibold">Ultravox · </span>{caption}</>}
     </span>}
   </div>;
 }

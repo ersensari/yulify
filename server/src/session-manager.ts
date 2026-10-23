@@ -2403,7 +2403,7 @@ class SessionManager extends EventEmitter {
 
   private duplexAssistantResponses = new Map<string, Set<string>>();
 
-  /** Persist one final, already-sanitized MiniCPM assistant response. User words are never inferred here. */
+  /** Persist one final, already-sanitized Ultravox assistant response. User words are never inferred here. */
   recordDuplexAssistant(sessionId: string, responseId: string, text: string): boolean {
     if (!getSession(sessionId) || !responseId || responseId.length > 256 || !text.trim() || Buffer.byteLength(text, "utf8") > 16_384) return false;
     let seen = this.duplexAssistantResponses.get(sessionId);
@@ -2413,7 +2413,7 @@ class SessionManager extends EventEmitter {
     if (seen.size > 128) seen.delete(seen.values().next().value!);
     const message = {
       id: responseId, role: "assistant", content: [{ type: "text", text }],
-      api: "openai-completions", provider: "forgeloop-provider", model: "MiniCPM-o",
+      api: "openai-completions", provider: "forgeloop-provider", model: "ultravox-1b",
       usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
       stopReason: "stop", timestamp: Date.now(),
     };
@@ -2431,7 +2431,7 @@ class SessionManager extends EventEmitter {
     return client.getDuplexToolSchemas();
   }
 
-  /** Run one validated MiniCPM tool through the same wrapped SDK definitions and guard hooks as Pi. */
+  /** Run one validated Ultravox tool through the same wrapped SDK definitions and guard hooks as Pi. */
   async executeDuplexTool(sessionId: string, name: string, args: unknown, callId: string, signal: AbortSignal, onUpdate?: (update: unknown) => void) {
     if (!getSession(sessionId)) throw new Error("Chat session not found.");
     if (this.duplexToolsRunning.has(sessionId) || this.prompting.has(sessionId) || this.isBusy(sessionId) || this.compacting.has(sessionId) || this.editing.has(sessionId)) {
