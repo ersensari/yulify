@@ -16,7 +16,7 @@ import { readVoice } from "../voice-presets.js";
 import { noteMessage, replyLanguage } from "../pi/reply-language.js";
 import { voiceHeaders } from "../voice-auth.js";
 
-const AGENT_NAME = "yulify-gemma4";
+const AGENT_NAME = "yulify-moshi";
 const MAX_ACTIVE = 1;
 type ActiveRoom = { noticeSince: number; room: string; dispatchId: string; sessionId: string; bridgeToken: string; createdAt: number; lastSeenAt: number; calls: Map<string, { controller: AbortController; signature: string; promise: Promise<any> }> };
 const active = new Map<string, ActiveRoom>();
@@ -38,12 +38,12 @@ function liveKitConfig() {
   const serverUrl = process.env.LIVEKIT_SERVER_URL?.trim();
   const key = process.env.LIVEKIT_API_KEY?.trim();
   const secret = process.env.LIVEKIT_API_SECRET?.trim();
-  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for Gemma E4B duplex");
+  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for PersonaPlex duplex");
   if (!/^wss?:\/\//i.test(publicUrl) || !/^https?:\/\//i.test(serverUrl)) throw new Error("LiveKit public/server URLs use unsupported protocols");
   return { publicUrl, serverUrl, key, secret };
 }
 
-/** Authenticated room issuance for the dedicated Gemma E4B LiveKit voice worker. */
+/** Authenticated room issuance for the dedicated PersonaPlex LiveKit voice worker. */
 export function minicpmDuplexRouter(): Router {
   const router = express.Router();
   router.get("/sessions/:id/voice/gemma4/capabilities", async (req, res) => {
@@ -59,7 +59,7 @@ export function minicpmDuplexRouter(): Router {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     if (!getSession(sessionId)) return res.status(404).json({ error: { code: "session_not_found", message: "Chat session not found", retryable: false } });
-    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The Gemma E4B voice session is busy. Try again after it closes.", retryable: true } });
+    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The PersonaPlex voice session is busy. Try again after it closes.", retryable: true } });
     if (sessions.isBusy(sessionId)) return res.status(409).json({ error: { code: "chat_busy", message: "Finish the current Yulify chat operation before starting voice tools.", retryable: true } });
     starting = true;
     try {
@@ -77,27 +77,27 @@ export function minicpmDuplexRouter(): Router {
         const recentlyCreated = Date.now() - current.createdAt < 30_000;
         const heartbeatFresh = Date.now() - current.lastSeenAt < 90_000;
         if (found.length && (recentlyCreated || (hasAgent && heartbeatFresh))) {
-          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active Gemma E4B voice room. Stop it before reconnecting.", retryable: true } });
+          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active PersonaPlex voice room. Stop it before reconnecting.", retryable: true } });
         }
         if (found.length) await rooms.deleteRoom(current.room);
         for (const call of current.calls.values()) call.controller.abort(new Error("Stale voice room replaced."));
         active.delete(sessionId);
       }
-      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Gemma E4B voice session is busy. Try again after it closes.", retryable: true } });
+      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The PersonaPlex voice session is busy. Try again after it closes.", retryable: true } });
       const room = `yulify-${nanoid(20).toLowerCase()}`;
       const identity = `browser-${nanoid(16).toLowerCase()}`;
       await rooms.createRoom({ name: room, emptyTimeout: 60, departureTimeout: 20, maxParticipants: 2 });
       let dispatchId = "";
       try {
         const bridgeToken = randomBytes(32).toString("base64url");
-        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "gemma4-duplex-v1", bridgeToken }) });
+        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "moshi-duplex-v1", bridgeToken }) });
         dispatchId = dispatch.id;
         const token = new AccessToken(cfg.key, cfg.secret, {
           identity,
           name: "Yulify voice",
           ttl: "5m",
-          metadata: JSON.stringify({ sessionId, runtime: "gemma4" }),
-          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "gemma4" },
+          metadata: JSON.stringify({ sessionId, runtime: "moshi" }),
+          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "moshi" },
         });
         token.addGrant({
           roomJoin: true,
@@ -108,7 +108,7 @@ export function minicpmDuplexRouter(): Router {
         });
         const jwt = await token.toJwt();
         active.set(sessionId, { noticeSince: eventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1)[0]?.seq ?? 0, room, dispatchId, sessionId, bridgeToken, createdAt: Date.now(), lastSeenAt: Date.now(), calls: new Map() });
-        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: true, tools: true } });
+        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: false, tools: false } });
       } catch (error) {
         if (dispatchId) await dispatches.deleteDispatch(dispatchId, room).catch(() => undefined);
         await rooms.deleteRoom(room).catch(() => undefined);
@@ -117,7 +117,7 @@ export function minicpmDuplexRouter(): Router {
     } catch (error) {
       const message = (error as Error).message;
       const missingConfig = message.includes("not configured");
-      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "Gemma E4B voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
+      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "PersonaPlex voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
     } finally {
       starting = false;
     }
@@ -141,7 +141,7 @@ export function minicpmDuplexRouter(): Router {
       if (active.get(sessionId) === current) active.delete(sessionId);
       return res.json({ ok: true });
     } catch (error) {
-      return res.status(502).json({ error: { code: "room_close_failed", message: "Gemma E4B voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
+      return res.status(502).json({ error: { code: "room_close_failed", message: "PersonaPlex voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
     }
   });
   return router;

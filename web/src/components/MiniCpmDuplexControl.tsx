@@ -7,6 +7,7 @@ import { session } from "../safe-storage";
 /** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
 export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onError }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onError?: (message: string) => void }) {
   const room = useRef<MiniCpmDuplexRoom>();
+  const attemptId = useRef(0);
   const release = useRef<(() => void) | undefined>();
   const [state, setState] = useState<DuplexRoomState>("closed");
   const [message, setMessage] = useState("");
@@ -20,6 +21,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   const busy = state === "connecting" || state === "reconnecting";
 
   const stop = async () => {
+    attemptId.current++;
     release.current?.(); release.current = undefined;
     if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
@@ -35,6 +37,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     setCaption(""); captionRef.current = "";
     setToolActivity("");
     const run = async () => {
+      const attempt = ++attemptId.current;
       try {
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
@@ -83,8 +86,10 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
           } catch (error) { const message = (error as Error).message; setMessage(message); onError?.(message); }
         });
         await client.connect();
+        if (attempt !== attemptId.current) return;
         await client.setMicrophoneEnabled(!muted.current && !musicPaused.current);
       } catch (error) {
+        if (attempt !== attemptId.current) return;
         const current = room.current; room.current = undefined;
         await current?.close();
         release.current?.(); release.current = undefined;
@@ -121,6 +126,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
       const detail = (event as CustomEvent).detail;
       if (detail?.sessionId !== sessionId) return;
       musicPaused.current = !!detail.playing;
+      void room.current?.setMusicPlaying(musicPaused.current);
       void room.current?.setMicrophoneEnabled(!musicPaused.current && !muted.current);
       onStatus?.(state, caption);
     };
@@ -138,9 +144,9 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   }, [sessionId]);
 
   return <div className="relative flex items-center gap-1">
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start Gemma E4B full-duplex voice")} title={t("Start Gemma E4B full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop Gemma E4B full-duplex voice")} title={message || `${t("Stop Gemma E4B full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start PersonaPlex full-duplex voice")} title={t("Start PersonaPlex full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop PersonaPlex full-duplex voice")} title={message || `${t("Stop PersonaPlex full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
-      {message || toolActivity || <><span className="font-semibold">Gemma E4B · </span>{caption}</>}
+      {message || toolActivity || <><span className="font-semibold">PersonaPlex · </span>{caption}</>}
     </span>}
   </div>;
 }

@@ -9,9 +9,10 @@ export type DuplexRoomHooks = {
 
 type RoomGrant = { url: string; room: string; token: string };
 
-/** LiveKit transport for Gemma E4B LiveKit voice. Audio AEC/NS are browser WebRTC features. */
+/** LiveKit transport for PersonaPlex LiveKit voice. Audio AEC/NS are browser WebRTC features. */
 export class MiniCpmDuplexRoom {
   private room?: Room;
+  private rejectWorkerReady?: (error: Error) => void;
   private grant?: RoomGrant;
   private audioElements = new Set<HTMLMediaElement>();
   private disposed = false;
@@ -31,7 +32,7 @@ export class MiniCpmDuplexRoom {
     this.hooks.state?.("connecting");
     const response = await fetch(`/api/sessions/${encodeURIComponent(this.sessionId)}/voice/gemma4/room`, { method: "POST" });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error?.message || `Could not start Gemma E4B voice (${response.status})`);
+    if (!response.ok) throw new Error(body?.error?.message || `Could not start PersonaPlex voice (${response.status})`);
     this.grant = body as RoomGrant;
     const room = this.room = new Room({ adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: true });
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _publication: RemoteTrackPublication, _participant: RemoteParticipant) => {
@@ -43,8 +44,19 @@ export class MiniCpmDuplexRoom {
       void element.play().catch(() => this.hooks.state?.("error", "Allow audio playback in the browser, then reconnect."));
     });
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => this.detach(track));
+    let resolveReady!: () => void;
+    let rejectReady!: (error: Error) => void;
+    const workerReady = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    this.rejectWorkerReady = rejectReady;
+    void workerReady.catch(() => undefined);
+    const readyDeadline = setTimeout(() => rejectReady(new Error("PersonaPlex did not become ready. Stop voice and reconnect.")), 45_000);
     room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
-      try { this.hooks.event?.(JSON.parse(new TextDecoder().decode(payload)) as DuplexRoomEvent); } catch { /* ignore malformed status packets */ }
+      try {
+        const event = JSON.parse(new TextDecoder().decode(payload)) as DuplexRoomEvent;
+        if (event.type === "session.status" && event.status === "connected") resolveReady();
+        if (event.type === "session.error") rejectReady(new Error(String(event.message || "PersonaPlex could not start.")));
+        this.hooks.event?.(event);
+      } catch { /* ignore malformed status packets */ }
     });
     room.on(RoomEvent.ParticipantDisconnected, () => {
       if (!this.disposed) {
@@ -63,10 +75,14 @@ export class MiniCpmDuplexRoom {
     try {
       await room.connect(this.grant.url, this.grant.token, { autoSubscribe: true });
       await this.replaceMicrophone();
+      await workerReady;
       this.hooks.state?.("connected");
     } catch (error) {
       await this.close();
       throw error;
+    } finally {
+      clearTimeout(readyDeadline);
+      if (this.rejectWorkerReady === rejectReady) this.rejectWorkerReady = undefined;
     }
   }
 
@@ -75,8 +91,12 @@ export class MiniCpmDuplexRoom {
     await this.room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "interrupt" })), { reliable: true, topic: "yulify.voice-control" });
   }
 
+  async setMusicPlaying(playing: boolean): Promise<void> {
+    await this.room?.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: "music", playing })), { reliable: true, topic: "yulify.voice-control" });
+  }
+
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
-    if (!this.room) throw new Error("Gemma E4B voice is not connected");
+    if (!this.room) throw new Error("PersonaPlex voice is not connected");
     this.microphoneEnabled = enabled;
     const track = this.microphone;
     if (!track) return; // Recovery applies the most recent policy before publishing.
@@ -97,7 +117,7 @@ export class MiniCpmDuplexRoom {
 
   private async replaceMicrophone(): Promise<void> {
     const room = this.room;
-    if (!room || this.disposed) throw new Error("Gemma E4B voice is not connected");
+    if (!room || this.disposed) throw new Error("PersonaPlex voice is not connected");
     const old = this.microphone;
     const deviceId = old?.mediaStreamTrack.getSettings().deviceId;
     this.stopMeter?.(); this.stopMeter = undefined;
@@ -162,12 +182,14 @@ export class MiniCpmDuplexRoom {
 
   /** Camera is opt-in. Calling this explicitly creates the camera track. */
   async setCamera(enabled: boolean): Promise<void> {
-    if (!this.room) throw new Error("Gemma E4B voice is not connected");
-    if (enabled) throw new Error("Gemma E4B yalnızca ses girdisini destekliyor.");
+    if (!this.room) throw new Error("PersonaPlex voice is not connected");
+    if (enabled) throw new Error("PersonaPlex yalnızca ses girdisini destekliyor.");
   }
 
   async close(): Promise<void> {
     this.disposed = true;
+    this.rejectWorkerReady?.(new Error("Voice connection closed."));
+    this.rejectWorkerReady = undefined;
     this.microphone?.stop(); this.microphone = undefined;
     this.microphoneStream?.getTracks().forEach(track => track.stop()); this.microphoneStream = undefined;
     this.stopMeter?.(); this.stopMeter = undefined;
