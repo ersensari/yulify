@@ -11,6 +11,7 @@ import { CONTEXT_FILES, SHARED_FILES } from "../pi/context-files.js";
 import { understoryOn } from "../features.js";
 import { sessions } from "../session-manager.js";
 
+import { savedServer, resolveKey } from "../providers.js";
 import { config as voiceConfig } from "./voice.js";
 import { readVoice } from "../voice-presets.js";
 import { noteMessage, replyLanguage } from "../pi/reply-language.js";
@@ -108,7 +109,7 @@ export function minicpmDuplexRouter(): Router {
         });
         const jwt = await token.toJwt();
         active.set(sessionId, { noticeSince: eventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1)[0]?.seq ?? 0, room, dispatchId, sessionId, bridgeToken, createdAt: Date.now(), lastSeenAt: Date.now(), calls: new Map() });
-        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: false, tools: false } });
+        return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: false, tools: true } });
       } catch (error) {
         if (dispatchId) await dispatches.deleteDispatch(dispatchId, room).catch(() => undefined);
         await rooms.deleteRoom(room).catch(() => undefined);
@@ -243,6 +244,45 @@ export function minicpmDuplexBridgeRouter(): Router {
     completed.set(cacheKey, { signature, result, expiresAt: Date.now() + ROOM_IDLE_TTL_MS });
     while (completed.size > 256) completed.delete(completed.keys().next().value!);
     if (!res.headersSent) return res.json(result);
+  });
+
+  // Only this room's trusted worker can call the coordinator; provider keys never reach the browser.
+  router.post("/sessions/:id/voice/gemma4/bridge/completion", async (req, res) => {
+    const sessionId = String(req.params.id);
+    if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
+    const { messages, purpose } = req.body ?? {};
+    if (!["route", "tools", "summary"].includes(purpose) || !Array.isArray(messages) || messages.length > 96 || Buffer.byteLength(JSON.stringify(messages)) > 256_000)
+      return res.status(400).json({ error: "invalid coordinator request" });
+    const provider = savedServer("forgeloop-provider");
+    if (!provider) return res.status(503).json({ error: "ForgeLoop provider is not configured" });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90_000);
+    const abort = () => { if (!res.writableEnded) controller.abort(); };
+    res.once("close", abort);
+    try {
+      let model = process.env.YULIFY_DUPLEX_ROUTER_MODEL;
+      if (!model) {
+        const status = await fetch("http://127.0.0.1:10105/router/status", { signal: controller.signal });
+        if (!status.ok) throw new Error("Strata model status unavailable");
+        model = (await status.json() as any).current;
+      }
+      if (!model) throw new Error("No Strata model is ready");
+      const schemas = purpose === "tools" ? await sessions.duplexToolSchemas(sessionId) : [];
+      const key = resolveKey(provider.key);
+      const upstream = await fetch(provider.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
+        method: "POST", signal: controller.signal,
+        headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+        body: JSON.stringify({ model, messages, stream: false, temperature: purpose === "route" ? 0 : 0.3,
+          max_tokens: purpose === "route" ? 256 : 2048, chat_template_kwargs: { enable_thinking: false },
+          ...(schemas.length ? { tools: schemas.map(tool => ({ type: "function", function: tool })), tool_choice: "auto" } : {}),
+        }),
+      });
+      if (!upstream.ok) throw new Error(`Strata coordinator returned HTTP ${upstream.status}`);
+      const result = await upstream.json() as any;
+      if (!result.choices?.[0]?.message) throw new Error("Strata returned no coordinator message");
+      return res.json({ message: result.choices[0].message, model });
+    } catch (error) { if (!res.headersSent) return res.status(502).json({ error: (error as Error).message }); }
+    finally { clearTimeout(timer); res.off("close", abort); }
   });
 
   router.get("/sessions/:id/voice/gemma4/bridge/notifications", (req, res) => {
