@@ -203,6 +203,7 @@ function create(chat:string,workspace:string,recovery?:string,title?:string,type
 }
 export function meetingNotesRouter(options:{summarize?:(id:string,text:string,type?:MeetingType)=>Promise<string>}={}):Router{
   const router=express.Router(),summarize=options.summarize??summarizeMeetingPart;
+  const retries=new Map<string,Promise<string>>();
   const get=(chat:string,workspace:string)=>{
     let s=active.get(chat);
     if(!s){s=recover(chat,workspace);if(s){active.set(chat,s);watch(s,summarize);}}
@@ -266,6 +267,40 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string,ty
         return res.json({...snapshot,title:meta.title,meeting_type:meetingType(meta.meeting_type),summary_text,summary_status:meta.summary_status,summary_error:meta.summary_error,transcriptPath:requested});
       }
       const s=get(session.id,session.workspace);res.json(s?{...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)}:{status:'idle',recording:false,turns:[]});
+    }catch(e){res.status(502).json({error:(e as Error).message});}
+  });
+  router.post('/sessions/:id/meeting/summary',async(req,res)=>{
+    const session=getSession(String(req.params.id));if(!session)return res.status(404).json({error:'Session not found'});
+    const requested=req.body?.transcriptPath;
+    if(typeof requested!=='string'||!/^\.meeting-notes\/meeting-[\w.-]+\.txt$/.test(requested))return res.status(400).json({error:'Invalid meeting transcript path'});
+    const file=path.join(session.workspace,requested),stateFile=file.replace(/\.txt$/,'.state.json'),snapshotFile=file.replace(/\.txt$/,'.json'),summaryFile=file.replace(/\.txt$/,'.summary.md');
+    try{
+      if(![file,stateFile,snapshotFile].every(f=>fs.existsSync(f)&&fs.lstatSync(f).isFile()))return res.status(404).json({error:'Meeting not found'});
+      const meta=JSON.parse(fs.readFileSync(stateFile,'utf8'));
+      if(meta.chat!==session.id)return res.status(404).json({error:'Meeting not found'});
+      if(meta.recording)return res.status(409).json({error:'Stop the recording before summarizing'});
+      const current=active.get(session.id);
+      if(current?.filePath===file&&current.summary)await current.summary;
+      if(fs.existsSync(summaryFile)&&fs.lstatSync(summaryFile).isFile())return res.json({summary_text:fs.readFileSync(summaryFile,'utf8'),summary_status:'completed'});
+      let work=retries.get(file);
+      if(!work){
+        const snapshot=JSON.parse(fs.readFileSync(snapshotFile,'utf8')) as TranscriptionSnapshot;
+        const source=(snapshot.turns??[]).map(t=>`[${label(t.start)}] ${t.speaker}: ${t.text}`).join('\n');
+        if(!source.trim())return res.status(409).json({error:'No saved transcript to summarize'});
+        work=(async()=>{
+          const state=JSON.parse(fs.readFileSync(stateFile,'utf8'));
+          state.summary_status='summarizing';delete state.summary_error;durableWrite(stateFile,JSON.stringify(state));
+          try{
+            const text=await summarizeBounded(session.id,source,meetingType(state.meeting_type),summarize);
+            durableWrite(summaryFile,text+'\n');state.summary_status='completed';delete state.summary_error;durableWrite(stateFile,JSON.stringify(state));
+            if(current?.filePath===file){current.summary_text=text;current.summary_status='completed';delete current.summary_error;}
+            sessions.recordMeeting(session.id,{kind:'summary',meeting:path.basename(file),text:`### Meeting summary\n\n${text}`});
+            return text;
+          }catch(e){state.summary_status='failed';state.summary_error=(e as Error).message;durableWrite(stateFile,JSON.stringify(state));if(current?.filePath===file){current.summary_status='failed';current.summary_error=state.summary_error;}throw e;}
+        })();
+        retries.set(file,work);void work.finally(()=>retries.delete(file)).catch(()=>{});
+      }
+      res.json({summary_text:await work,summary_status:'completed'});
     }catch(e){res.status(502).json({error:(e as Error).message});}
   });
   // Accept cached 15s clients and up to 5-minute packets. ASR still receives <=2s.

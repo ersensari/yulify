@@ -165,6 +165,7 @@ export function MeetingNotes({ sessionId, record }: { sessionId: string; record?
         {!snapshot?.turns.length&&<p className="text-xs text-fg-muted">{recording?"Listening… speech appears after a pause.":"No transcript yet."}</p>}
       </div>
       {snapshot?.summary_status&&<p className="mt-2 text-xs text-fg-muted">Summary: {snapshot.summary_status}{snapshot.summary_error?` · ${snapshot.summary_error}`:""}</p>}
+      {!recording && !ownedElsewhere && file && snapshot?.turns?.length && !snapshot.summary_text && <button type="button" disabled={busy} className="mt-2 rounded-lg border border-line px-3 py-2 text-sm disabled:opacity-50" onClick={()=>{setBusy(true);setError(null);void api.summarizeMeeting(sessionId,file).then(result=>setSnapshot(old=>old?{...old,...result,summary_error:undefined}:old),e=>setError((e as Error).message)).finally(()=>setBusy(false));}}>Create summary</button>}
       {record && snapshot?.summary_text&&<p className="mt-2 whitespace-pre-wrap text-sm">{snapshot.summary_text}</p>}
       {file&&<p className="mt-3 break-all text-xs text-fg-muted">Saved in Files: {file}</p>}
   </section>;

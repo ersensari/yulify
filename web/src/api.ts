@@ -481,6 +481,7 @@ export const api = {
   meetings: () => json<{meetings: MeetingEntry[]}>("/api/meetings"),
   configureMeeting: (sessionId: string, title: string, type: MeetingType) => json<{ok: boolean}>(`/api/sessions/${sessionId}/meeting/config`, { method: "POST", body: JSON.stringify({title, type}) }),
   meetingStatus: (sessionId: string, transcriptPath?: string) => json<MeetingSnapshot>(`/api/sessions/${sessionId}/meeting${transcriptPath ? `?transcriptPath=${encodeURIComponent(transcriptPath)}` : ""}`),
+  summarizeMeeting: (sessionId: string, transcriptPath: string) => json<{summary_text:string;summary_status:string}>(`/api/sessions/${sessionId}/meeting/summary`, {method:"POST",body:JSON.stringify({transcriptPath})}),
   sendMeetingChunk: async (sessionId: string, samples: Float32Array, sequence: number): Promise<TranscriptionSnapshot> => {
     const res = await send(`/api/sessions/${sessionId}/meeting/chunk`, { method: "POST", headers: { "Content-Type": "audio/wav", "X-Audio-Sequence": String(sequence) }, body: samplesWav(samples), signal:AbortSignal.timeout(30_000) });
     const body = await res.json().catch(() => ({}));

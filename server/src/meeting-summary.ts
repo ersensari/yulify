@@ -2,6 +2,7 @@
 import { chatModel, getSession } from './db.js';
 import { modelRuntime } from './api/providers.js';
 import { sessions } from './session-manager.js';
+import { readPiSettings } from './pi-settings.js';
 export const MEETING_TYPES = ['general', 'standup', 'planning', 'interview', 'retrospective', 'lecture'] as const;
 export type MeetingType = typeof MEETING_TYPES[number];
 const focus: Record<MeetingType, string> = {
@@ -15,12 +16,20 @@ const focus: Record<MeetingType, string> = {
 export function meetingType(value: unknown): MeetingType {
   return typeof value === 'string' && MEETING_TYPES.includes(value as MeetingType) ? value as MeetingType : 'general';
 }
+export function selectSummaryModel(runtime:any,live:{provider:string;id:string}|undefined,row:{provider?:string|null;model?:string|null},saved:{provider:string;model:string},defaults:Record<string,unknown>){
+  const piProvider=typeof defaults.defaultProvider==='string'?defaults.defaultProvider:'';
+  const piModel=typeof defaults.defaultModel==='string'?defaults.defaultModel:'';
+  const provider=live?.provider || (!row.provider&&!row.model&&piProvider&&piModel?piProvider:saved.provider);
+  const id=live?.id || (!row.provider&&!row.model&&piProvider&&piModel?piModel:saved.model);
+  return {provider,id,model:runtime.getModel(provider,id)};
+}
 export async function summarizeMeetingPart(sessionId:string,transcript:string,type:MeetingType='general'):Promise<string>{
   const row=getSession(sessionId);if(!row)throw new Error('Session not found');
   const live=await sessions.currentModel(sessionId).catch(()=>undefined);
-  const saved=chatModel(row),provider=live?.provider||saved.provider,id=live?.id||saved.model;
-  const runtime=await modelRuntime(),model=runtime.getModel(provider,id);
-  if(!model || model.api!=='openai-completions')throw new Error('The selected model does not support meeting summaries through chat completions');
+  const saved=chatModel(row),runtime=await modelRuntime();
+  const {provider,id,model}=selectSummaryModel(runtime,live,row,saved,readPiSettings());
+  if(!model)throw new Error(`Meeting model ${provider}/${id} is unavailable in Pi`);
+  if(model.api!=='openai-completions')throw new Error(`Meeting model ${provider}/${id} does not support chat completions`);
   const auth=(await runtime.getAuth(model).catch(()=>undefined))?.auth??{};
   const base=String(auth.baseUrl??model.baseUrl??'').replace(/\/+$/,'');
   if(!base)throw new Error('The selected model has no completion endpoint');

@@ -10,6 +10,7 @@ const {createSession,getDb}=await import('../dist/db.js');
 const {sessions}=await import('../dist/session-manager.js');
 const {meetingNotesRouter}=await import('../dist/api/meeting-notes.js');
 const {meetingWav,MeetingAudio}=await import('../dist/meeting-audio.js');
+const {selectSummaryModel}=await import('../dist/meeting-summary.js');
 const workspace=path.join(home,'work');fs.mkdirSync(workspace,{recursive:true});
 for(const id of ['meeting','legacy','parts','outage','abandoned'])createSession({id,title:id,workspace,executor:'host',auto_title:0});
 let summaryCount=0,partSummaries=0,down=false;const inputs=[],sources=new Map();
@@ -91,4 +92,15 @@ test('ASR failure does not stop durable capture; archives reopen after a restart
   const archive=new MeetingAudio(root);assert.equal(archive.samples,15*16000);assert.equal(archive.packets.length,1);
   assert.equal((await audio('outage',15,1)).status,200);down=false;
   assert.equal((await post('outage','/stop',{summarize:false})).status,200);
+  const before=partSummaries, transcript=fs.readFileSync(path.join(workspace,value.transcriptPath));
+  const [one,two]=await Promise.all([post('outage','/summary',{transcriptPath:value.transcriptPath}),post('outage','/summary',{transcriptPath:value.transcriptPath})]);
+  assert.equal(one.status,200);assert.equal(two.status,200);assert.equal(partSummaries,before+1);
+  assert.deepEqual(fs.readFileSync(path.join(workspace,value.transcriptPath)),transcript);
+  assert.equal((await post('outage','/summary',{transcriptPath:value.transcriptPath})).status,200);assert.equal(partSummaries,before+1);
+});
+test('meeting summary follows Pi defaults for a new chat and retains explicit or live models',()=>{
+  const rt={getModel:(provider,id)=>({provider,id})},saved={provider:'stale',model:'old'},defaults={defaultProvider:'forgeloop-provider',defaultModel:'gyro-gyro-m'};
+  assert.deepEqual(selectSummaryModel(rt,undefined,{provider:null,model:null},saved,defaults).model,{provider:'forgeloop-provider',id:'gyro-gyro-m'});
+  assert.deepEqual(selectSummaryModel(rt,undefined,{provider:'chosen',model:'model'}, {provider:'chosen',model:'model'},defaults).model,{provider:'chosen',id:'model'});
+  assert.deepEqual(selectSummaryModel(rt,{provider:'live',id:'now'},{},saved,defaults).model,{provider:'live',id:'now'});
 });
