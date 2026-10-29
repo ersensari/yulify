@@ -111,6 +111,12 @@ export function speechRouter(): Router {
     try {res.json(await sharedAsr(`/examples?offset=${offset}`));}
     catch(e) {res.status(502).json({error:(e as Error).message});}
   });
+  router.get("/voice/speaker-examples/suggestions", async (req,res) => {
+    const offset=Number(req.query.offset||0);
+    if(!Number.isInteger(offset)||offset<0||offset>10000)return res.status(400).json({error:"Invalid page offset"});
+    try {res.json(await sharedAsr(`/examples/suggestions?offset=${offset}`));}
+    catch(e) {res.status(502).json({error:(e as Error).message});}
+  });
   router.get("/voice/speaker-examples/:id/audio", async(req,res) => {
     if (!/^[a-f0-9]{32}$/.test(String(req.params.id)))return res.status(400).json({error:"Invalid example id"});
     try {

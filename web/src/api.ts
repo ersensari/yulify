@@ -491,6 +491,7 @@ export const api = {
   },
   stopMeeting: (sessionId: string, summarize = true, incomplete = false) => json<MeetingSnapshot & {ok:boolean;transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/stop`, { method: "POST",body:JSON.stringify({summarize,incomplete}) }),
   speakerExamples: (offset=0) => json<{examples:SpeakerExample[];next_offset?:number|null;retention_days:number}>(`/api/voice/speaker-examples?offset=${offset}`),
+  speakerExampleSuggestions: (offset=0) => json<{suggestions:{id:string;person:string;score:number}[];next_offset:number|null;display_only:boolean;automatic_assignment:boolean}>(`/api/voice/speaker-examples/suggestions?offset=${offset}`),
   assignSpeakerExample: (id:string,person:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"PUT",body:JSON.stringify({person})}),
   deleteSpeakerExample: (id:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"DELETE"}),
   setVoiceGpu: (gpu: string) => json<{ selected: string; restarting: boolean }>('/api/voice/gpu', { method: 'PUT', body: JSON.stringify({ gpu }) }),
