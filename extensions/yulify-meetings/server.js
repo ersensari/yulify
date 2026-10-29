@@ -15,11 +15,12 @@ function meetings(portal) {
       return "";
     }
   };
-  function locate(chatId, stem) {
-    if (!valid.test(stem)) throw new Error("Invalid meeting");
-    const chat = portal.chats.get(chatId);
-    if (!chat) throw new Error("Chat not found");
-    const base = portal.chats.folder(chat.id);
+  const folderId = (folder) => createHash("sha256").update(folder).digest("hex");
+  function locate(folderKey, stem) {
+    if (!valid.test(stem) || !/^[a-f0-9]{64}$/.test(folderKey)) throw new Error("Invalid meeting");
+    const folder = portal.folders.list().find((f) => folderId(f.path) === folderKey && portal.folders.allowed(f.path));
+    if (!folder) throw new Error("Folder not found");
+    const base = folder.path;
     const options = { likeParent: true, chats: portal.chats.inFolder(base).map((c) => c.id) };
     const read = (rel) => {
       const result = portal.files.read(base, rel, options);
@@ -27,28 +28,32 @@ function meetings(portal) {
       return result.content;
     };
     const state = JSON.parse(read(`.meeting-notes/${stem}.state.json`));
-    if (state.chat !== chat.id) throw new Error("Meeting not found in this chat");
-    return { chat, base, options, read, state };
+    if (typeof state.chat !== "string" || !state.chat) throw new Error("Invalid meeting owner");
+    const chat = portal.chats.get(state.chat);
+    if (chat && portal.chats.folder(chat.id) !== base) throw new Error("Meeting belongs to another folder");
+    return { folder, chat, base, options, read, state };
   }
   portal.router.get("/meetings", (_req, res) => {
     const meetings2 = [], warnings = [];
-    for (const chat of portal.chats.list()) {
+    for (const folder of portal.folders.list()) {
       try {
-        const base = portal.chats.folder(chat.id);
+        if (!portal.folders.allowed(folder.path)) continue;
+        const base = folder.path, folderKey = folderId(base);
         const options = { likeParent: true, chats: portal.chats.inFolder(base).map((c) => c.id) };
         const listing = portal.files.list(base, ".meeting-notes", options);
-        if (listing.truncated) warnings.push(`${chat.title}: meeting list truncated`);
+        if (listing.truncated) warnings.push(`${folder.name}: meeting list truncated`);
         for (const entry of listing.entries) {
           const match = /^(meeting-[\w.-]+)\.state\.json$/.exec(entry.name);
           if (!match || entry.type !== "file" || entry.link) continue;
           try {
-            const found = locate(chat.id, match[1]);
-            meetings2.push({ chatId: chat.id, chatTitle: chat.title, id: match[1], name: name(chat.id, match[1]), startedAt: found.state.startedAt, recording: !!found.state.recording });
+            const found = locate(folderKey, match[1]);
+            meetings2.push({ chatId: folderKey, chatTitle: found.chat?.title ?? folder.name, originalChatId: found.state.chat, orphaned: !found.chat, id: match[1], name: name(folderKey, match[1]), startedAt: found.state.startedAt, recording: !!found.state.recording });
           } catch {
+            warnings.push(`${folder.name}: could not read an archive`);
           }
         }
       } catch (e) {
-        if (e.code !== "missing") warnings.push(`${chat.title}: unable to read meeting list`);
+        if (e.code !== "missing") warnings.push(`${folder.name}: unable to read meeting list`);
       }
     }
     meetings2.sort((a, b) => String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")));
