@@ -26,33 +26,53 @@ agent of another name is left alone: the new one gets the next free name,
 `agents/<name>-2`.
 
 A card opens that agent (`/agents?agent=research-bot`), with **New
-conversation** to start one with it and four tabs: **Conversations**,
+conversation** to start a chat with it, the same as the **+** on its folder in the
+sidebar, and six tabs: **Conversations** (every chat in its home, however it was
+started, and the number above it counts them all),
 **Activity** (what its heartbeat noticed, with the number unread),
-**Heartbeat**, and **Files** to edit. The tab is kept in the link (`&tab=files`). Its avatar is at
+**Heartbeat**, **Tools** (see [below](#tools)), **Skills** and **Files** to edit. The tab is kept in the link (`&tab=files`). Its avatar is at
 the top beside its name; the palette on it opens the avatar customizer. Each
 agent's avatar is its own, and voice mode shows the avatar of the agent the
-chat is with (the first agent's for a chat in a project). Its
+chat is with (the agent a project works with for a chat in it, the first agent's if it
+works with none, see [Projects](/guide/projects#an-agent-for-a-project)). Its
 name, with the pencil beside it, renames it; the folder keeps its name, and
 `.agent-name` in it takes the new one.
 **Agents** at the top goes back to the cards.
+
+The **New** button in the sidebar starts a chat with the first agent. To have it
+start with another one, open that agent and turn on **New chats start here**:
+the **New** button then goes to it. The **+** beside a folder in the chat list still starts a chat in that
+folder. Turning the switch off, or turning it on for another agent, gives the
+choice up; deleting the agent hands it back to the first agent.
 
 The **Files** tab edits `SOUL.md`, `PrimaryUser.md`, `MEMORY.md` and `WATCH.md`.
 The agent writes these files too, `MEMORY.md` above all, so a save made from a
 copy the agent has changed since is not applied. The tab says "This file changed
 after you opened it" and offers **Load the new version** or **Save mine anyway**.
-A file that is a link is left alone: it is neither shown nor written through, and the tab says so instead of offering an editor. It counts as there, so an agent whose `SOUL.md` is a link that leads nowhere (by a path that only the container knows) is not asked to be set up again. When a new agent's folder already has such a link, the note on its page says the answers were not written to it and that it is left as it is.
+A file that is a link is left alone: it is neither shown nor written through, nor handed to the agent as its own, and the tab says so instead of offering an editor. It counts as there, so an agent whose `SOUL.md` is a link that leads nowhere (by a path that only the container knows) is not asked to be set up again. When a new agent's folder already has such a link, the note on its page says the answers were not written to it and that it is left as it is.
 
 ## Its voice
 
-With the voice add-on installed, the avatar customizer (the palette on the
-agent's avatar) has a **Voice** menu under the preview: the voice the agent
-speaks with in voice mode, saved with **Save avatar**. **As in the voice settings** follows the
-voice chosen in Settings; a designed voice or one from the voice library is the
-agent's own. **Add voice** at the end of the menu adds a voice to the library,
-a clone from a recording or one designed from a description, and gives it to
-the agent. A chat in a project shows the first agent's avatar and speaks with its voice.
-A library voice that is deleted is no longer any agent's, and those
-that had it speak as the voice settings say again.
+While voice mode has a source that speaks (see
+[Where voice mode listens and speaks](/guide/voice#where-voice-mode-listens-and-speaks)),
+the avatar customizer (the palette on the agent's avatar) has a **Voice** menu
+under the preview: the voice the agent speaks with in voice mode, saved with
+**Save avatar**. It lists the voices the source offers now: with
+[the voice service](/guide/voice-service#your-voice), the designed voice and
+your voices, or Kokoro's own voices while Kokoro speaks; with
+[Voice servers](/guide/voice-servers), the voices on its page. **As Voice
+service chooses** (named after the source) is the source's own choice, the
+voice set on its page. Under the menu, **Add a voice in Voice service** opens
+the source's page in Settings, where voices are added, and asks first whether
+to discard what you changed in the avatar and did not save. Closing Settings
+brings you back to the Agents page, and opening the avatar again lists the new
+voice. A chat in a project shows the avatar of the agent the project
+works with and speaks with its voice, the first agent's where the project works
+with none.
+
+An agent's voice that the source does not offer now, one that was deleted or
+one of another engine's, is kept and shown as **Not offered now**, and the
+agent speaks with the source's own choice until it is offered again.
 
 ## Its heartbeat
 
@@ -77,15 +97,17 @@ and no browser. To let it run a command, add it under **Commands it may run**,
 for example `gh pr list*`. A command runs only as written there, with `*` where
 it varies, and a pipe, a redirect or a second command makes it something else.
 Those commands are for every agent's heartbeat, and show in **People** as
-rules for every agent's heartbeat. A rule for all roles applies to it too.
+rules for every agent's heartbeat. A rule for all roles applies to it too. A
+look runs on its own, on what it reads, which can be anybody's words, so what is
+allowed for it never reaches a place secrets are kept, a write to what is loaded
+as the agent's own (its context files, `WATCH.md`, `AGENTS.md`, `.pi/`,
+`.mcp.json`), or a subagent or a routine, which would run with your rights.
 
 What it notices lands in **Activity** as notes; the tab and the agent's card
 show how many are unread. A note marked urgent also goes to the
 channel routines report to, when there is one. It comes into that chat as a
-routine's report does, so the chat counts as having read untrusted content (the
-look read whatever `WATCH.md` names) until you start a new one with `/new`: it
-will not push or set up a routine there before. Most looks find nothing, and say
-nothing.
+routine's report does, wrapped as data, since the look read whatever `WATCH.md`
+names. Most looks find nothing, and say nothing.
 
 A look never gets in the way: it waits while any chat or routine is working,
 and **Look now** is refused until they are done,
@@ -95,13 +117,30 @@ told you. A look that a restart cuts off shows as "Interrupted by a restart",
 and one you stop with Stop in its chat as "Stopped", until the next one. Looks need the host executor; under the container executor nothing
 would hold them to reading, so they do not run.
 
+## Tools
+
+The **Tools** tab is the same list a chat's tools control shows, grouped the same
+way. What you switch there is what every chat in the agent's home starts with, and
+every run it does on its own: its heartbeat, and the routines that run in its home.
+It is saved as each switch is flipped. The switches are exceptions to Settings →
+Tools, both ways, so a tool the agent never mentioned still follows the default: an
+agent that should never run shell commands switches `bash` off here, without
+touching any other agent.
+
+A project and a routine come after the agent and can switch a tool again for their
+own, and so does a chat's [mode](/guide/sessions#modes); a chat's own switch has the last word, except that it cannot turn the code tool off where the mode switches it on. Chats in a project are not in any agent's
+home, and follow the project, also where it works with an agent: that agent's soul, user
+and memory are used, but not its tool switches. See [Routines](/guide/routines#tools) for the order of
+all the layers.
+
 ## In the sidebar
 
 Each agent's home is a folder in the sidebar and on the Sessions page, named
-after the agent. The first agent's has the house icon, the others a robot. The
-**+** on a folder's line starts a chat with that agent. A conversation started on the Agents page
-is listed there too; conversations that came through a channel are on the Agents
-page only.
+after the agent. The house icon marks the agent that **New** starts chats with (the first one unless you picked another), the others have a robot. The
+**+** on a folder's line starts a chat with that agent. A chat and a conversation
+are the same thing: a chat started with **+** or **New** in its home is listed on the
+Agents page and counted there, and **New conversation** there starts the same kind of
+chat. Conversations that came through a channel are on the Agents page only.
 
 ## Channels and routines
 
@@ -121,7 +160,7 @@ or stop them afterwards. The dialog says so. It asks what to do with its folder,
 and with it, its routines:
 
 - **Keep its folder**: its files and memory stay, and so do the pictures its chats
-  made, in the [Images page](/guide/images), and its routines, switched off. Make an
+  made, on the [Media page](/guide/media), and its routines, switched off. Make an
   agent with the name it had when it was deleted (its last one, if it was renamed)
   and it picks them all up again; a routine of its that is left on the Routines page
   meanwhile says that the agent whose home it was has been deleted.

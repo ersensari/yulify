@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# What the Update button puts aside while it installs and builds (core/server/src/update-files.ts)
+*.update-old
 data/
 .env
 .env.local
@@ -10,11 +12,11 @@ data/
 docs/.vitepress/dist
 docs/.vitepress/cache
 
-# Optional voice runtime checkouts and model weights
+# Voice runtime checkouts and model weights an older version's Compose overlay used
 voice-runtime/
 
 # Generated, version-matched VAD model and WebAssembly assets
-web/public/voice-assets/
+core/web/public/voice-assets/
 
 playwright-report/
 test-results/
@@ -23,3 +25,5 @@ test-results/
 server/test/fixtures/*.db-shm
 server/test/fixtures/*.db-wal
 .env.bak*
+core/server/test/fixtures/*.db-shm
+core/server/test/fixtures/*.db-wal

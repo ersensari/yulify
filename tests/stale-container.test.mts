@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {removeStoppedRunner} from '../server/src/executors/stale-container.ts';
+import {removeStoppedRunner} from '../core/server/src/executors/stale-container.ts';
 const fixture=(status='exited',managed='true')=>JSON.stringify([{Id:'immutable-container-id',Config:{Labels:{'forgeloop.managed':managed,'forgeloop.project':'forgeloop-ai','yulify.managed':managed,'yulify.session':'test'}},State:{Status:status}}]);
 test('only stopped managed runners are removed, by ID without force',async()=>{
  for(const status of ['created','exited','dead']){

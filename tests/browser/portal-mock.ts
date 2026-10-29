@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { test as base, expect, type Page, type Route } from '@playwright/test';
 
 /**
@@ -5,14 +7,29 @@ import { test as base, expect, type Page, type Route } from '@playwright/test';
  *
  * `test` is Playwright's, with one addition: before a test starts, every `/api` request is answered 501 with its own
  * name, so a call that no test mocked fails where it is made, with the URL in the message. Nothing reaches the dev
- * server's proxy, and so no portal that runs on this machine. A test's own `page.route` is registered after it and
- * wins; what it does not answer falls back to this one.
+ * server's proxy, and so no portal that runs on this machine. The extensions the portal has installed are the
+ * exception: they are listed and their files served, for the app and for a fixture page that loads them as the app
+ * does. So is the lease every voice session takes as it starts and gives back at its end (`…/voice/connection`),
+ * which is granted. A test's own `page.route` is registered after it and wins; what it does not answer falls back to
+ * this one.
+ *
+ * `installed` is those extensions, by their folders from the repository's root, and is none unless a spec says:
+ * `test.use({ installed: ['extensions/git'] })`. The portal's own specs install a stand-in where they need an
+ * extension's panel or window (tests/fixtures/extensions/console), so that none of them needs one the portal
+ * ships, which can be removed.
  */
-export const test = base.extend<{ unmocked: string[] }>({
-  unmocked: [async ({ page }, use, testInfo) => {
+export const test = base.extend<{ unmocked: string[]; installed: string[] }>({
+  installed: [[], { option: true }],
+  unmocked: [async ({ page, installed }, use, testInfo) => {
     const asked: string[] = [];
-    await page.route('**/api/**', (route) => {
+    const extensions = installed.map((folder) => extensionOnDisk(path.join(ROOT, folder)));
+    await page.route('**/api/**', async (route) => {
       const { pathname, search } = new URL(route.request().url());
+      if (route.request().method() === 'GET') {
+        if (pathname === '/api/extension-ui') return route.fulfill({ json: { extensions: extensions.map((ext) => ext.listing) } });
+        for (const ext of extensions) if (await ext.serve(pathname, route)) return;
+      }
+      if (route.request().method() === 'POST' && /^\/api\/sessions\/[^/]+\/voice\/connection$/.test(pathname)) return route.fulfill({ json: { ok: true } });
       const what = `${route.request().method()} ${pathname}${search}`;
       asked.push(what);
       return route.fulfill({ status: 501, json: { error: `Not mocked: ${what}` } });
@@ -44,24 +61,63 @@ export const DONE = Symbol('answered by the test');
 
 export type Answer = unknown | Reply | typeof HANG | typeof DONE;
 
+// This file is loaded as CommonJS (it is .ts, and the repository is not a module): its own folder is __dirname.
+const ROOT = path.resolve(__dirname, '../..');
+
+const TYPES: Record<string, string> = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
+
 /**
- * What every portal says unless a test says otherwise: signed in without a password, no chats, and the three things the
- * shell asks of every page (the add-on flags, the browser add-on, the voice add-on, the places for a new chat) and of
- * every chat (what runs in the background, what came before), with nothing set up.
+ * An extension's package on disk, as the portal lists it (`/api/extension-ui`)
+ * and serves the folder of its browser half: built, where it has a build.
+ * `serve` answers a request for one of its files, and says whether it did.
+ */
+export function extensionOnDisk(dir: string) {
+  const meta = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  const declared = meta.pithagoras ?? {};
+  const client = typeof declared.client === 'string' ? path.resolve(dir, declared.client) : undefined;
+  const served = client && path.dirname(client);
+  const prefix = `/api/extension-ui/${String(meta.name).split('/').map(encodeURIComponent).join('/')}/`;
+  const listing = {
+    name: meta.name,
+    version: meta.version,
+    ...(Array.isArray(declared.themes) ? { themes: declared.themes } : {}),
+    ...(client ? { rev: 'test', entry: `${prefix}${path.basename(client)}?v=test` } : {}),
+    ...(client && typeof declared.style === 'string' ? { style: `${prefix}${path.relative(served!, path.resolve(dir, declared.style)).split(path.sep).join('/')}?v=test` } : {}),
+    ...(typeof declared.server === 'string' ? { server: `/api/x/${meta.name}` } : {}),
+  };
+  const serve = async (urlPath: string, route: Route): Promise<boolean> => {
+    if (!served || !urlPath.startsWith(prefix)) return false;
+    const file = path.resolve(served, decodeURIComponent(urlPath.slice(prefix.length)));
+    if (!file.startsWith(served + path.sep) || !existsSync(file)) return false;
+    await route.fulfill({ path: file, contentType: TYPES[path.extname(file)] ?? 'application/octet-stream' });
+    return true;
+  };
+  return { name: meta.name as string, listing, serve };
+}
+
+
+/**
+ * What every portal says unless a test says otherwise: signed in without a password, no chats, and the things the
+ * shell asks of every page (the feature flags, voice mode with no source, which extensions draw in it, the places for a new
+ * chat) and of every chat (what runs in the background, what came before, the modes it may be put in), with nothing set up.
  */
 const portalBase = ({ path, method, url }: Ask): Answer => {
   if (method !== 'GET') return undefined;
   if (path === '/api/auth/status') return { authed: true, authRequired: false };
   if (path === '/api/sessions') return { sessions: [], executor: 'host' };
-  if (path === '/api/features/flags') return { subagent: { enabled: false }, understory: { enabled: false }, images: { enabled: false } };
+  if (path === '/api/features/flags') return { subagent: { enabled: false }, memory: { held: false, by: null }, understory: { enabled: false }, images: { enabled: false } };
   if (path === '/api/browser') return {
     running: false, unprotected: false, connectedAs: null, install: { available: false, image: false, container: 'absent', pulling: { active: false, line: '' } },
     config: { user: '', hasPassword: false }, version: null, pages: [], uiPort: '', cursor: true, allowlist: '', configured: false, byDefault: true, sessions: [], routines: [],
   };
-  if (path === '/api/voice') return { enabled: false };
+  if (path === '/api/voice') return { provider: '', ready: false, speech: true, voices: [], enabled: false };
   if (path === '/api/voice/speaker-examples') return {examples:[],next_offset:null,retention_days:7};
+  // A portal that is not run from a checkout: nothing to update, no notice.
+  if (path === '/api/update') return { kind: 'none', boot: 'boot-a' };
   if (/^\/api\/sessions\/[^/]+\/background$/.test(path)) return { supported: true, jobs: [], statuses: [], widgets: [] };
   if (/^\/api\/sessions\/[^/]+\/events\/before$/.test(path)) return { events: [], more: false };
+  // No modes to choose from: a chat draws no picker unless a test offers some.
+  if (/^\/api\/sessions\/[^/]+\/modes$/.test(path)) return { modes: [] };
   if (path === '/api/projects' && url.searchParams.has('bare')) return { root: '/w', home: '/h', projects: [] };
   return undefined;
 };
@@ -78,9 +134,14 @@ const settingsBase = ({ path, method }: Ask): Answer => {
   if (path === '/api/providers') return { presets: [], apis: ['openai-completions'], hosted: [], providers: [] };
   if (path === '/api/routines/report-targets') return { targets: [], default: null };
   if (path === '/api/extensions') return { settingsPath: '/a/settings.json', extensions: [] };
+  if (path === '/api/extensions/shipped') return { extensions: [] };
+  // What installing a package brings with it, asked before it is installed: nothing else.
+  if (path === '/api/extensions/plan') return { needs: [] };
   if (path === '/api/tool-names') return { names: {} };
   if (path === '/api/packages/catalog') return { packages: [] };
   if (path === '/api/workspaces') return { root: '/w', workspaces: [] };
+  // About asks whether the portal can restart itself.
+  if (path === '/api/restart') return { possible: true, by: 'systemd', running: 0, loaded: [], keepsLogins: true };
   return undefined;
 };
 

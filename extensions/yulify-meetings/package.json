@@ -1,0 +1,11 @@
+{
+  "name": "yulify-meetings",
+  "version": "0.1.0",
+  "description": "Saved meeting recordings, transcripts and summaries",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {},
+  "pithagoras": { "client": "./web/client.js", "server": "./server.js" },
+  "scripts": { "build": "node build.mjs" },
+  "license": "Apache-2.0"
+}

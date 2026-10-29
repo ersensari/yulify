@@ -6,7 +6,9 @@ runs the same `git` you would type in the [terminal](/guide/terminal) next to it
 in the same folder, so what it shows is what the agent sees.
 
 The panel is for the repository the chat's folder is in. Where the folder is in no
-repository, it says so and offers **Make it one (git init)**.
+repository, it says so and offers **Make it one (git init)**. Where the folder holds
+clones of its own (a workspace with several projects), a **Repository** picker offers
+them, see [The header](#the-header).
 
 It follows the agent. A file the agent writes, the end of its turn, and switching
 back to the browser tab each read the state again; while a run is going and the
@@ -17,6 +19,15 @@ made from the agent's shell shows up.
 
 Under the tabs, one line shows where the repository is:
 
+- **The repository.** When the chat's folder has repositories inside it, a
+  **Repository** picker lists them by their path in the folder, with the
+  repository around the folder first. Everything in the panel then belongs to the one
+  picked, and a file opened in Files is found under the clone's path. The pick is
+  kept per chat in this browser. A folder in no repository of its own that holds
+  exactly one shows that one at once, and the folder itself stays in the picker (as `.`) so it can be made a
+  repository too. A folder with an empty or broken `.git` (a half-made folder, or a file naming a
+  repository that is gone) is not listed. The folder is scanned four levels deep, for up to 50 repositories; hidden folders, `node_modules`, build output and links are
+  skipped, and a repository inside another one is not listed. Refresh scans again.
 - **The branch.** Click it to open Branches. On a detached HEAD it reads
   *detached at* and the short hash.
 - **Its upstream**, with `↑n` commits to push and `↓n` to pull, or `✓` when both
@@ -209,8 +220,12 @@ changed while it is open — it was committed, or put back — the view says so.
 - **It is the same repository as the agent's.** There is no separate copy: a
   commit made here is in the agent's history, and the agent's uncommitted work is
   what appears under Changes.
-- **The HTTP routes** are under `/api/sessions/:id/git`; see the
-  [HTTP API](/reference/api#git).
+- **It is an extension.** The panel is the `pithagoras-git` package from the
+  portal's `extensions/git`, installed when a portal starts for the first time
+  and listed under Settings → Extensions → Installed like any other. Turn it off
+  or remove it and the branch icon goes; install your own panel by the name
+  `git` and it takes its place. Its HTTP routes are under
+  `/api/x/pithagoras-git/chats/:id`; see the [HTTP API](/reference/api#git).
 - Like the other panels, it docks left, right or bottom or floats; see
   [Files → Panels](/guide/files#panels). In [voice mode](/guide/voice) it is not
   offered.

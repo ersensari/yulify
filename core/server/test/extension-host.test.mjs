@@ -1,0 +1,654 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { inProcessHome } from "./server-harness.mjs";
+
+/**
+ * An extension's server half: a module the portal loads into its own process,
+ * with routes of its own, the chats, the pages open on them, and what it adds
+ * to a chat's pi. The module here writes what it is handed and what it hears
+ * into `globalThis.seen`, which the tests read.
+ */
+const home = inProcessHome("extension-host-");
+const pkg = path.join(home, "packages", "notes");
+mkdirSync(pkg, { recursive: true });
+const NAME = "@codacus/notes";
+
+/** The package's server module, written anew: `body` is the default export's own. */
+function write(body, file = "server.js") {
+  writeFileSync(path.join(pkg, file), `export default async function (portal) {\n${body}\n}\n`);
+  const stat = statSync(path.join(pkg, file));
+  return (current = { name: NAME, version: "1.0.0", file: path.join(pkg, file), rev: `${Math.round(stat.mtimeMs).toString(36)}-${stat.size.toString(36)}-${++revs}` });
+}
+let revs = 0;
+/** The half last written, as the portal was last told of it. */
+let current;
+
+const MODULE = `
+  const { closeSync: require_close } = await import("node:fs");
+  const seen = (globalThis.seen ??= { life: [], events: [], stopped: 0, started: 0 });
+  seen.started++;
+  seen.portal = portal;
+  portal.router.get("/hello", (req, res) => res.json({ hello: portal.extension, url: req.url, query: req.query }));
+  portal.router.post("/json", portal.http.json(), (req, res) => res.json({ got: req.body }));
+  portal.router.post("/unread", (req, res) => res.json({ body: req.body ?? null }));
+  portal.router.post("/file", (req, res) => { let n = 0; req.on("data", (d) => (n += d.length)); req.on("end", () => res.json({ bytes: n })); });
+  portal.router.get("/chats/:id", (req, res) => { const chat = portal.chats.get(req.params.id); chat ? res.json({ chat, folder: portal.chats.folder(chat.id) }) : res.status(404).json({ error: "No such chat" }); });
+  portal.router.get("/boom", () => { throw new Error("its own failure"); });
+  portal.router.get("/files/:name", (req, res) => res.json({ name: req.params.name, query: req.query }));
+  // A file made in a chat's folder, and one of it sent: what it is by its bytes is the package's to look at.
+  portal.router.post("/make", portal.http.raw({ type: "*/*", limit: "5mb" }), (req, res) => res.json({ path: portal.files.create(portal.chats.folder("a"), "", req.query.name, req.body) }));
+  portal.router.get("/opened", (req, res) => { const { fd, ...file } = portal.files.open(portal.chats.folder("a"), req.query.path); res.json(file); require_close(fd); });
+  portal.router.get("/send", (req, res) => {
+    const file = portal.files.open(portal.chats.folder("a"), req.query.path);
+    if (req.query.only === "pictures" && !file.mimeType?.startsWith("image/")) { require_close(file.fd); return res.status(400).json({ error: "not a picture" }); }
+    portal.http.send(req, res, file, req.query.download ? { download: req.query.download } : {});
+  });
+  portal.chats.onOpen((chatId) => (chatId === "quiet" ? undefined : { type: "state", for: chatId }));
+  // One that cannot be written as JSON: left out, and nothing else is the worse for it.
+  portal.chats.onOpen((chatId) => (chatId === "a" ? { big: 10n } : undefined));
+  portal.chats.on("started", (id) => seen.life.push("started " + id));
+  portal.chats.on("stopped", (id) => seen.life.push("stopped " + id));
+  portal.chats.on("deleted", (id) => seen.life.push("deleted " + id));
+  portal.chats.onEvent((id, event) => seen.events.push([id, event.type]));
+  portal.chats.extend((pi, chat) => pi.registerTool({ name: "from_" + chat.id }));
+  portal.http.upgrade((req, socket) => { seen.upgraded = req.url; socket.end(); });
+  return () => { seen.stopped++; };
+`;
+
+const { default: express } = await import("express");
+const host = await import("../dist/extension-host.js");
+const { createSession } = await import("../dist/db.js");
+const { eventsRouter } = await import("../dist/api/events.js");
+
+const work = path.join(process.env.WORKSPACE_ROOT, "site");
+mkdirSync(work, { recursive: true });
+createSession({ id: "a", title: "First chat", workspace: work, executor: "host" });
+createSession({ id: "quiet", title: "Quiet chat", workspace: work, executor: "host" });
+
+const app = express();
+// As the portal does: one parser for everything but what reads its own.
+const json = express.json();
+app.use((req, res, next) => (req.path.startsWith("/api/x/") ? next() : json(req, res, next)));
+app.use("/api/x", host.extensionRoutes);
+app.use("/api", eventsRouter());
+app.use("/api", (req, res) => res.status(404).json({ error: `No such API route: ${req.method} ${req.originalUrl}` }));
+app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+const server = await new Promise((resolve) => {
+  const s = app.listen(0, "127.0.0.1", () => resolve(s));
+});
+test.after(async () => {
+  await host.stopServerHalves();
+  server.closeAllConnections();
+  server.close();
+});
+const at = (p) => `http://127.0.0.1:${server.address().port}${p}`;
+const seen = () => globalThis.seen;
+
+await host.syncServerHalves([write(MODULE)]);
+
+test("a server half's routes are under its package's name, written from its own root", async () => {
+  const hello = await (await fetch(at("/api/x/@codacus/notes/hello?who=me"))).json();
+  assert.deepEqual(hello, { hello: NAME, url: "/hello?who=me", query: { who: "me" } });
+  assert.equal((await (await fetch(at("/api/x/%40codacus/notes/hello"))).json()).hello, NAME, "its name written as an address");
+  // Nobody's, or not one of its own: the portal's own answer for a route there is none of.
+  for (const none of ["/api/x/@codacus/notes/nothing", "/api/x/@codacus/other/hello", "/api/x/@codacus/noteshello", "/api/x/"]) {
+    const res = await fetch(at(none));
+    assert.equal(res.status, 404, none);
+    assert.match((await res.json()).error, /No such API route/, none);
+  }
+  const boom = await fetch(at("/api/x/@codacus/notes/boom"));
+  assert.equal(boom.status, 500);
+  assert.equal((await boom.json()).error, "its own failure", "its failure is answered, and the portal goes on");
+  assert.equal((await fetch(at("/api/x/@codacus/notes/hello"))).status, 200);
+});
+
+test("the rest of a path is read once, by the package's own routes: what was written as part of a name stays part of it", async () => {
+  const named = async (written) => (await (await fetch(at(`/api/x/@codacus/notes/files/${written}`))).json());
+  assert.deepEqual(await named("what%3F.md"), { name: "what?.md", query: {} });
+  assert.deepEqual(await named("a%23b"), { name: "a#b", query: {} });
+  assert.deepEqual(await named("100%25"), { name: "100%", query: {} });
+  assert.deepEqual(await named("a%252Fb"), { name: "a%2Fb", query: {} }, "not read a second time");
+  assert.deepEqual(await named("plain.md?line=7"), { name: "plain.md", query: { line: "7" } });
+  // The package's own name, written as an address in either part.
+  assert.equal((await fetch(at("/api/x/%40codacus/n%6Ftes/files/x"))).status, 200);
+  assert.equal((await fetch(at("/api/x/%40codacus%2Fnotes/files/x"))).status, 404, "a slash written as text is not the one between its two parts");
+});
+
+test("no body is read for a server half unless its route asks, so a route can take a file as it comes", async () => {
+  const post = (route, body, type = "application/json") => fetch(at(`/api/x/@codacus/notes/${route}`), { method: "POST", headers: { "content-type": type }, body }).then((r) => r.json());
+  assert.deepEqual(await post("json", JSON.stringify({ a: 1 })), { got: { a: 1 } });
+  assert.deepEqual(await post("unread", JSON.stringify({ a: 1 })), { body: null });
+  // A .json file sent as a file is a file: larger than any request the portal reads for itself.
+  const big = JSON.stringify({ text: "x".repeat(3 * 1024 * 1024) });
+  assert.deepEqual(await post("file", big), { bytes: Buffer.byteLength(big) });
+});
+
+test("a server half is told of the chats, and of the folder each works in", async () => {
+  const { chat, folder } = await (await fetch(at("/api/x/@codacus/notes/chats/a"))).json();
+  assert.deepEqual(chat, { id: "a", title: "First chat", workspace: work, status: "idle" });
+  assert.equal(folder, realpathSync(work));
+  assert.equal((await fetch(at("/api/x/@codacus/notes/chats/gone"))).status, 404);
+  const { portal } = seen();
+  assert.deepEqual(portal.chats.list().map((c) => c.id).sort(), ["a", "quiet"]);
+  assert.equal(portal.chats.get("gone"), undefined);
+  assert.throws(() => portal.chats.folder("gone"), /No such chat/);
+  assert.equal(portal.files.inside(folder, "src/index.ts"), path.join(folder, "src", "index.ts"));
+  assert.throws(() => portal.files.inside(folder, "../elsewhere"));
+});
+
+test("a server half makes a file in a chat's folder, never over one that is there, is told what a file is by its bytes, and sends it as the portal sends its own", async () => {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const make = (name, body) => fetch(at(`/api/x/@codacus/notes/make?name=${encodeURIComponent(name)}`), { method: "POST", headers: { "content-type": "application/octet-stream" }, body }).then((r) => r.json());
+  assert.deepEqual(await make("dot.png", png), { path: "dot.png" });
+  assert.deepEqual(await make("dot.png", png), { path: "dot (2).png" }, "a taken name gets a number");
+  assert.deepEqual(readFileSync(path.join(work, "dot (2).png")), png);
+  writeFileSync(path.join(work, "notes.txt"), "not a picture\n");
+
+  // What a file is, by its bytes and not its name; nothing for one that is no picture or clip.
+  const opened = async (file) => (await fetch(at(`/api/x/@codacus/notes/opened?path=${encodeURIComponent(file)}`))).json();
+  const { mtime, change, ...dot } = await opened("dot.png");
+  assert.deepEqual(dot, { size: png.length, name: "dot.png", mimeType: "image/png" });
+  assert.equal(typeof mtime, "number");
+  assert.equal(typeof change, "string");
+  writeFileSync(path.join(work, "dot.txt"), png);
+  assert.equal((await opened("dot.txt")).mimeType, "image/png", "named as text, a picture all the same");
+  assert.equal("mimeType" in (await opened("notes.txt")), false);
+
+  const send = (only, file, headers = {}, extra = "") => fetch(at(`/api/x/@codacus/notes/send?only=${only}&path=${encodeURIComponent(file)}${extra}`), { headers });
+  const picture = await send("pictures", "dot.png");
+  assert.equal(picture.status, 200);
+  assert.equal(picture.headers.get("content-type"), "image/png");
+  assert.equal(picture.headers.get("x-content-type-options"), "nosniff");
+  assert.match(picture.headers.get("content-security-policy"), /sandbox/);
+  assert.deepEqual(Buffer.from(await picture.arrayBuffer()), png);
+  // A version the browser has is not sent again, and the part a player asks for is sent alone.
+  // As a browser revalidates: fetch would add "no-cache" to a request with If-None-Match of its own, which is never fresh.
+  assert.equal((await send("pictures", "dot.png", { "if-none-match": picture.headers.get("etag"), "cache-control": "max-age=0" })).status, 304);
+  const part = await send("pictures", "dot.png", { range: "bytes=0-3" });
+  assert.equal(part.status, 206);
+  assert.deepEqual(Buffer.from(await part.arrayBuffer()), png.subarray(0, 4));
+  // The package refuses what it does not take.
+  assert.equal((await send("pictures", "notes.txt")).status, 400);
+  // A file that is no picture or clip is bytes to be saved; any file can be sent to be saved.
+  const plain = await send("any", "notes.txt");
+  assert.equal(plain.headers.get("content-type"), "application/octet-stream");
+  assert.match(plain.headers.get("content-disposition"), /^attachment; filename="notes.txt"/);
+  assert.match((await send("any", "dot.png", {}, "&download=dot.png")).headers.get("content-disposition"), /^attachment; filename="dot.png"/);
+});
+
+/** What a page hears under `event: extension` on a chat's stream, until `enough` of it has come. */
+async function heard(chat, enough, during = () => {}) {
+  const abort = new AbortController();
+  const res = await fetch(at(`/api/sessions/${chat}/events`), { signal: abort.signal });
+  const got = [];
+  let text = "";
+  let acted = false;
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of res.body) {
+      text += decoder.decode(chunk, { stream: true });
+      let end;
+      while ((end = text.indexOf("\n\n")) !== -1) {
+        const block = text.slice(0, end);
+        text = text.slice(end + 2);
+        const name = /^event: (.+)$/m.exec(block)?.[1];
+        if (name === "extension") got.push(JSON.parse(/^data: (.+)$/m.exec(block)[1]));
+        // Once the stream has said where things stand, what is sent now is heard live.
+        if (name === "live-reset" && !acted) {
+          acted = true;
+          during();
+        }
+      }
+      if (got.length >= enough) break;
+    }
+  } finally {
+    abort.abort();
+  }
+  return got;
+}
+
+test("a page that opens a chat is told where things stand, then each thing a server half says, and nothing of another chat's", async () => {
+  const { portal } = seen();
+  const got = await heard("a", 3, () => {
+    portal.chats.send("quiet", { type: "elsewhere" });
+    portal.chats.send("a", { type: "changed", n: 1 });
+    portal.chats.send("a", undefined);
+  });
+  assert.deepEqual(got, [
+    { extension: NAME, data: { type: "state", for: "a" } },
+    { extension: NAME, data: { type: "changed", n: 1 } },
+    { extension: NAME, data: null },
+  ]);
+  // What could not be written (the second thing it says first, and this) was left out: the stream went on, as above.
+  portal.chats.send("a", { cycle: (() => { const o = {}; o.self = o; return o; })() });
+  // A browser half that came into the page later asks for the same, as it would be said now.
+  assert.deepEqual(await host.openingFor("a", NAME), [{ type: "state", for: "a" }]);
+  assert.deepEqual(await host.openingFor("quiet", NAME), []);
+  assert.deepEqual(await host.openingFor("a", "someone-else"), []);
+  // Nothing to say first to this one: only what is sent.
+  assert.deepEqual(await heard("quiet", 1, () => portal.chats.send("quiet", "hi")), [{ extension: NAME, data: "hi" }]);
+});
+
+test("a server half hears a chat's pi start and stop, the chat deleted, and all its pi says", () => {
+  host.chatLife("started", "a");
+  host.chatEvent("a", { type: "message_update" });
+  host.chatEvent("a", { type: "portal_extension_ui", extension: NAME, data: 1 });
+  host.chatLife("stopped", "a");
+  host.chatLife("deleted", "a");
+  assert.deepEqual(seen().life, ["started a", "stopped a", "deleted a"]);
+  assert.deepEqual(seen().events, [["a", "message_update"], ["a", "portal_extension_ui"]]);
+});
+
+test("what a server half adds to a chat's pi is registered as that pi loads, for that chat, under the package's name", () => {
+  const tools = [];
+  const quiet = host.hostExtensions("quiet");
+  assert.deepEqual(quiet.map((ext) => ext.name), [NAME], "pi files its tools under the package, as it would a package's pi extension's");
+  quiet[0].factory({ registerTool: (tool) => tools.push(tool.name) });
+  assert.deepEqual(tools, ["from_quiet"]);
+  host.hostExtensions("gone")[0].factory({ registerTool: (tool) => tools.push(tool.name) });
+  assert.deepEqual(tools, ["from_quiet"], "nothing for a chat that is not there");
+});
+
+test("a chat's pi is kept while a server half holds it, and let go when every hold is", () => {
+  const { portal } = seen();
+  assert.equal(host.extensionHolds("quiet"), false);
+  const first = portal.chats.hold("quiet");
+  const second = portal.chats.hold("quiet");
+  first();
+  first();
+  assert.equal(host.extensionHolds("quiet"), true, "one of two let go, and let go twice, is still one held");
+  second();
+  assert.equal(host.extensionHolds("quiet"), false);
+});
+
+test("upgrades under a server half's routes go to it, with the address as its routes see it", () => {
+  assert.equal(host.extensionUpgrade("/elsewhere/websockify"), undefined);
+  assert.equal(host.extensionUpgrade("/api/x/@codacus/other/socket"), undefined);
+  assert.equal(host.extensionUpgrade(undefined), undefined);
+  const handler = host.extensionUpgrade("/api/x/%40codacus/notes/socket?chat=a");
+  const req = { url: "/api/x/%40codacus/notes/socket?chat=a" };
+  handler(req, { end() {} }, Buffer.alloc(0));
+  assert.equal(seen().upgraded, "/socket?chat=a");
+});
+
+test("a command is run for a chat in the folder the chat works in, which is where a server half keeps what is the chat's", async () => {
+  const { portal } = seen();
+  // The sandbox is off here: as the portal's own user.
+  assert.equal(portal.sandbox.on(), false);
+  assert.deepEqual(portal.sandbox.spawnAs("a").argv, []);
+  const ran = await portal.sandbox.run("a", ["sh", "-c", "pwd; cat"], { input: "from stdin" });
+  assert.equal(ran.code, 0);
+  assert.equal(ran.stdout.toString(), `${realpathSync(work)}\nfrom stdin`);
+  assert.equal((await portal.sandbox.run("a", ["sh", "-c", "echo no >&2; exit 3"])).code, 3, "a command that fails is answered, not thrown");
+  // What it keeps for the chat is a file there, at a path checked to be inside.
+  const kept = portal.files.inside(portal.chats.folder("a"), ".notes/kept.json");
+  await portal.sandbox.run("a", ["sh", "-c", 'mkdir -p .notes && printf "%s" "$0" > .notes/kept.json', '{"n":1}']);
+  assert.equal(readFileSync(kept, "utf8"), '{"n":1}');
+});
+
+test("a server half has a folder of the portal's own in the data folder, closed to everyone else, one for each package", async () => {
+  const { portal } = seen();
+  const data = path.join(path.resolve(process.env.DATA_DIR), "extension-data");
+  assert.equal(existsSync(data), false, "not made until a package asks");
+  const dir = portal.dataDir();
+  assert.equal(dir, path.join(realpathSync(data), "%40codacus%2Fnotes"), "its name as one part of a path, where it really is");
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(statSync(data).mode & 0o777, 0o700);
+  assert.equal(portal.dataDir(), dir, "the same each time, and made once");
+  writeFileSync(path.join(dir, "kept"), "still here");
+  assert.equal(readFileSync(path.join(portal.dataDir(), "kept"), "utf8"), "still here");
+  // A package named as a step up, or as the folder itself, has a folder of its own too, below the data folder.
+  for (const name of ["..", ".", ".hidden"]) {
+    const file = path.join(pkg, "named.js");
+    writeFileSync(file, `export default async function (portal) { globalThis.seenDir = portal.dataDir(); }\n`);
+    await host.syncServerHalves([{ name, version: "1.0.0", file, rev: `named-${name}` }]);
+    assert.equal(path.dirname(globalThis.seenDir), realpathSync(data), name);
+    assert.ok(statSync(globalThis.seenDir).isDirectory(), name);
+  }
+  // One reached through a link is named by where it is, as `files` take a base.
+  const elsewhere = path.join(home, "kept-elsewhere");
+  mkdirSync(elsewhere);
+  symlinkSync(elsewhere, path.join(data, "linked"));
+  await host.syncServerHalves([{ name: "linked", version: "1.0.0", file: path.join(pkg, "named.js"), rev: "named-linked" }]);
+  assert.equal(globalThis.seenDir, realpathSync(elsewhere));
+  await host.syncServerHalves([write(MODULE)]);
+});
+
+test("what the portal left for an extension when an upgrade took something out of it, a server half takes into its own folder, whole, and has until it is done with it", async () => {
+  const { leaveHandoff } = await import("../dist/handoff.js");
+  const { portal } = seen();
+  const root = path.join(path.resolve(process.env.DATA_DIR), "handoff");
+  // Left by an upgrade that stopped half way: what it had moved stays in the folder it was filling, and the next try goes on with it.
+  const filling = path.join(root, ".notes.partial");
+  mkdirSync(filling, { recursive: true, mode: 0o700 });
+  mkdirSync(path.join(filling, "files"));
+  writeFileSync(path.join(filling, "files", "first.txt"), "moved before");
+  const fill = (dir) => {
+    assert.equal(dir, filling);
+    writeFileSync(path.join(dir, "files", "second.txt"), "moved now");
+    writeFileSync(path.join(dir, "rows.json"), '{"rows":[1]}');
+  };
+  assert.equal(leaveHandoff("notes", fill), "left");
+  const left = path.join(root, "notes");
+  assert.deepEqual(readdirSync(left).sort(), ["files", "rows.json"]);
+  assert.deepEqual(readdirSync(path.join(left, "files")).sort(), ["first.txt", "second.txt"]);
+  assert.equal(existsSync(filling), false, "put in place by its rename");
+  assert.equal(statSync(root).mode & 0o777, 0o700);
+  // Left already: an upgrade whose database rolled back after leaving it does not fill it again.
+  assert.equal(leaveHandoff("notes", () => assert.fail("filled again")), "there");
+
+  const taken = portal.handoffs.take("notes");
+  assert.equal(taken, path.join(portal.dataDir(), "handoff-notes"));
+  assert.equal(existsSync(left), false, "moved, not copied");
+  assert.equal(readFileSync(path.join(taken, "files", "first.txt"), "utf8"), "moved before");
+  assert.equal(readFileSync(path.join(taken, "rows.json"), "utf8"), '{"rows":[1]}');
+  // A start that stopped half way through reading it finds it again, in its own folder.
+  assert.equal(portal.handoffs.take("notes"), taken);
+  portal.handoffs.done("notes");
+  assert.equal(existsSync(taken), false);
+  assert.equal(portal.handoffs.take("notes"), undefined, "nothing left: nothing to take");
+  assert.equal(existsSync(path.join(portal.dataDir(), "handoff-notes")), false);
+  // A name is one part of a path, never a step out of the folder.
+  for (const name of ["..", ".notes.partial", "../notes", "Notes", "a/b", "", "x".repeat(65), undefined]) {
+    assert.throws(() => portal.handoffs.take(name), /is not a hand-off's name/, String(name));
+    assert.throws(() => portal.handoffs.done(name), /is not a hand-off's name/, String(name));
+  }
+});
+
+test("a server half changed is stopped and started anew, one gone is stopped, and one that fails says why", async () => {
+  const before = { started: seen().started, stopped: seen().stopped };
+  // The same again: nothing to do.
+  await host.syncServerHalves([current]);
+  assert.deepEqual({ started: seen().started, stopped: seen().stopped }, before);
+
+  await host.syncServerHalves([write(MODULE.replace('"/hello"', '"/hello2"'))]);
+  assert.deepEqual({ started: seen().started, stopped: seen().stopped }, { started: before.started + 1, stopped: before.stopped + 1 });
+  assert.equal((await fetch(at("/api/x/@codacus/notes/hello"))).status, 404, "the routes it had are gone with it");
+  assert.equal((await fetch(at("/api/x/@codacus/notes/hello2"))).status, 200);
+
+  await host.syncServerHalves([write('  throw new Error("cannot start here");')]);
+  assert.equal(host.serverFailure(NAME), "cannot start here");
+  assert.equal((await fetch(at("/api/x/@codacus/notes/hello2"))).status, 404);
+  assert.equal(seen().stopped, before.stopped + 2);
+
+  await host.syncServerHalves([write("  // nothing, and nothing to stop")]);
+  assert.equal(host.serverFailure(NAME), undefined);
+  await host.syncServerHalves([]);
+  assert.equal((await fetch(at("/api/x/@codacus/notes/hello2"))).status, 404);
+  assert.match(readFileSync(path.join(pkg, "server.js"), "utf8"), /nothing to stop/);
+});
+
+/**
+ * The folders above `where` made searchable by everyone: the kernel needs search on each of them for an agent to reach it, and the portal asks the
+ * same (files.* with likeParent), while a test's home is made closed to all but its owner. What the tests close on purpose is closed after.
+ */
+function reachable(where) {
+  for (let up = path.dirname(where); up !== path.dirname(up); up = path.dirname(up)) {
+    const mode = statSync(up).mode;
+    if (!(mode & 0o001)) chmodSync(up, mode | 0o001);
+  }
+}
+
+// The sandbox needs root on Linux, as the portal runs in its image, and its tools.
+const linuxRoot = process.platform === "linux" && process.getuid?.() === 0;
+const has = (cmd) => spawnSync("sh", ["-c", `command -v ${cmd}`]).status === 0;
+const noSandbox = !linuxRoot ? "needs root on Linux, as the portal runs in its image" : !has("setpriv") || !has("useradd") ? "needs setpriv and useradd" : false;
+
+test("with the sandbox on, what a server half runs for a chat runs as the chat's agent, with none of the portal's own environment", { skip: noSandbox }, async () => {
+  const exists = (kind, name) => spawnSync("getent", [kind, name]).status === 0;
+  if (!exists("group", "pi-sandbox")) execFileSync("groupadd", ["--gid", "10010", "pi-sandbox"]);
+  if (!exists("passwd", "pi-tools")) execFileSync("useradd", ["--uid", "10002", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-tools"]);
+  await host.syncServerHalves([write(MODULE)]);
+  const { portal } = seen();
+  const { parsePolicy, saveSandboxPolicy, defaultRules } = await import("../dist/sandbox/policy.js");
+  // Switched on, not applied: applying writes the system's sudo rules, which the sandbox's own test relies on.
+  const policy = parsePolicy({ enabled: true, rules: defaultRules(), trusted: [] });
+  saveSandboxPolicy(policy);
+  process.env.PORTAL_OWN_SECRET = "not for an agent";
+  try {
+    assert.equal(portal.sandbox.on(), true);
+    const as = portal.sandbox.spawnAs("a");
+    assert.equal(as.argv[0], "setpriv");
+    assert.equal(as.env.PORTAL_OWN_SECRET, undefined);
+    assert.match(as.env.USER, /^pi-agent-[0-9a-f]{8}$/);
+    // The command itself is the agent's: its user, its own HOME, and nothing of the portal's to print.
+    const ran = await portal.sandbox.run("a", ["sh", "-c", "id -un; id -u; echo ${PORTAL_OWN_SECRET:-nothing}"], { cwd: "/" });
+    assert.equal(ran.code, 0, ran.stderr);
+    const [user, uid, secret] = ran.stdout.toString().trim().split("\n");
+    assert.equal(user, as.env.USER);
+    assert.notEqual(uid, "0");
+    assert.equal(secret, "nothing");
+  } finally {
+    delete process.env.PORTAL_OWN_SECRET;
+    saveSandboxPolicy({ ...policy, enabled: false });
+  }
+});
+
+test("with the sandbox on, files.* with likeParent turn away what the chat's agent could not use itself: a closed folder renamed to documents, and a closed file moved into it, by the agent as the sandbox runs it", { skip: noSandbox }, async () => {
+  const exists = (kind, name) => spawnSync("getent", [kind, name]).status === 0;
+  if (!exists("group", "pi-sandbox")) execFileSync("groupadd", ["--gid", "10010", "pi-sandbox"]);
+  if (!exists("passwd", "pi-tools")) execFileSync("useradd", ["--uid", "10002", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-tools"]);
+  const shared = Number(execFileSync("getent", ["group", "pi-sandbox"], { encoding: "utf8" }).split(":")[2]);
+  await host.syncServerHalves([write(MODULE)]);
+  const { portal } = seen();
+  const { parsePolicy, saveSandboxPolicy, defaultRules } = await import("../dist/sandbox/policy.js");
+  const policy = parsePolicy({ enabled: true, rules: defaultRules(), trusted: [] });
+  saveSandboxPolicy(policy);
+  // A project the portal made, as the sandbox leaves it: root's, with the sandbox's group on it. Closed to the agent: root:root 0700, a file 0600.
+  const project = path.join(process.env.WORKSPACE_ROOT, "likeparent");
+  const documents = path.join(project, "documents");
+  mkdirSync(documents, { recursive: true });
+  reachable(project);
+  writeFileSync(path.join(documents, "plan.md"), "# ours");
+  mkdirSync(path.join(project, "secrets"));
+  writeFileSync(path.join(project, "secrets", "keys.md"), "# root only");
+  writeFileSync(path.join(project, "creds.md"), "# root only too");
+  for (const where of [project, documents]) execFileSync("sh", ["-c", `chown 0:${shared} ${where} && chmod 2775 ${where}`]);
+  execFileSync("sh", ["-c", `chown 0:${shared} ${documents}/plan.md && chmod 664 ${documents}/plan.md && chown 0:0 ${project}/secrets ${project}/secrets/keys.md ${project}/creds.md && chmod 700 ${project}/secrets && chmod 600 ${project}/secrets/keys.md ${project}/creds.md`]);
+  // The chat whose agent works there: the portal tells who the agent is from the workspace stored for it, as the sandbox runs it.
+  createSession({ id: "lp", title: "Like parent", workspace: project, executor: "host" });
+  const like = { likeParent: true, chats: ["lp"] };
+  const use = { direct: true, alone: true, ...like };
+  const code = (fn) => { try { fn(); } catch (e) { return e.code ?? e.message; } return "none"; };
+  try {
+    // The agent cannot read what is closed: it is the user the sandbox runs it as, and the portal asks the kernel's question of that user.
+    const asAgent = (...argv) => portal.sandbox.run("a", argv, { cwd: project });
+    const cannot = await asAgent("cat", "secrets/keys.md");
+    assert.notEqual(cannot.code, 0, "the agent cannot read the closed folder itself");
+    // As things are: the agent's folder is used.
+    assert.equal(portal.files.folder(project, "documents", { direct: true, ...like }), documents);
+    assert.equal(portal.files.readBytes(documents, "plan.md", use).bytes.toString(), "# ours");
+    assert.deepEqual(portal.files.list(documents, "", like).entries.map((e) => e.name), ["plan.md"]);
+    assert.equal(portal.files.identity(project, "documents", { direct: true, ...like }).ino, String(statSync(documents).ino));
+    // The agent moves the closed file in, and the closed folder onto the name (a rename needs the right to write in the project only).
+    assert.equal((await asAgent("mv", "creds.md", "documents/creds.md")).code, 0, "the agent can move what it cannot read");
+    assert.equal(code(() => portal.files.readBytes(documents, "creds.md", use)), "invalid", "a closed file in documents is not read for the agent");
+    assert.equal(portal.files.readBytes(documents, "plan.md", use).bytes.toString(), "# ours", "and the others are");
+    assert.equal((await asAgent("mv", "documents", "documents.aside")).code, 0);
+    assert.equal((await asAgent("mv", "secrets", "documents")).code, 0);
+    assert.equal(code(() => portal.files.folder(project, "documents", { direct: true, ...like })), "invalid");
+    assert.equal(code(() => portal.files.identity(project, "documents", { direct: true, ...like })), "invalid");
+    assert.equal(code(() => portal.files.list(documents, "", like)), "invalid");
+    assert.equal(code(() => portal.files.readBytes(documents, "keys.md", use)), "invalid");
+    assert.equal(code(() => portal.files.read(documents, "keys.md", like)), "invalid");
+    assert.equal(code(() => portal.files.write(documents, "new.md", "x", { create: true, direct: true, ...like })), "invalid");
+    assert.equal(code(() => portal.files.removeFile(documents, "keys.md", use)), "invalid");
+    assert.equal(code(() => portal.files.renameFile(documents, "keys.md", "other.md", use)), "invalid");
+    assert.deepEqual(readdirSync(documents), ["keys.md"], "nothing was made, removed or renamed in it");
+    // The portal itself reads it as ever, where it does not ask.
+    assert.equal(portal.files.readBytes(documents, "keys.md", { direct: true }).bytes.toString(), "# root only");
+  } finally {
+    saveSandboxPolicy({ ...policy, enabled: false });
+  }
+});
+
+test("with the sandbox on, the agent files.* ask for is the chat's own, from the workspace stored for it: a stored path that leads into another agent's home is checked as the chat's agent, not as the one whose home it leads to", { skip: noSandbox }, async () => {
+  const exists = (kind, name) => spawnSync("getent", [kind, name]).status === 0;
+  if (!exists("group", "pi-sandbox")) execFileSync("groupadd", ["--gid", "10010", "pi-sandbox"]);
+  if (!exists("passwd", "pi-tools")) execFileSync("useradd", ["--uid", "10002", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-tools"]);
+  await host.syncServerHalves([write(MODULE)]);
+  const { portal } = seen();
+  const { parsePolicy, saveSandboxPolicy, defaultRules, sandboxSupport } = await import("../dist/sandbox/policy.js");
+  const { identityOf } = await import("../dist/sandbox/identity.js");
+  const { createAgent } = await import("../dist/agents.js");
+  const policy = parsePolicy({ enabled: true, rules: defaultRules(), trusted: [] });
+  saveSandboxPolicy(policy);
+  try {
+    // A second agent, with its home as the sandbox leaves it (root's, its group\'s alone, 2770), and a documents folder of its own in it.
+    const second = createAgent({ name: "Second" });
+    const who = identityOf(second, sandboxSupport());
+    const shared = who.shared;
+    const workspace = path.join(second.home, "ws");
+    const documents = path.join(workspace, "documents");
+    mkdirSync(documents, { recursive: true });
+    reachable(second.home);
+    writeFileSync(path.join(documents, "plan.md"), "# second\'s own");
+    for (const where of [second.home, workspace, documents]) execFileSync("sh", ["-c", `chown 0:${who.gid} ${where} && chmod 2770 ${where}`]);
+    execFileSync("sh", ["-c", `chown 0:${who.gid} ${documents}/plan.md && chmod 660 ${documents}/plan.md`]);
+    // The first agent\'s chat: a project of its own, whose stored path is a link that leads into the second agent\'s home (a person made it, or the
+    // agent put it there where it writes: the path it resolves to is not the agent\'s to decide).
+    const link = path.join(process.env.WORKSPACE_ROOT, "leads-into-another-home");
+    execFileSync("ln", ["-s", workspace, link]);
+    createSession({ id: "led", title: "Led", workspace: link, executor: "host" });
+    createSession({ id: "second-own", title: "Second\'s own", workspace: workspace, executor: "host" });
+    // A routine run of the first agent, with the same stored link: not a task, so `chats.list` does not give it, and the tools are in its pi all the same.
+    createSession({ id: "routine-led", title: "Routine", workspace: link, executor: "host", kind: "routine", routine_slug: "r" });
+    assert.equal(portal.chats.folder("led"), workspace, "what the chat\'s folder is now: the second agent\'s home");
+    const code = (fn) => { try { fn(); } catch (e) { return e.code ?? e.message; } return "none"; };
+    const asked = (chats, rel = "documents") => code(() => portal.files.folder(workspace, rel, { direct: true, likeParent: true, chats }));
+    const read = (chats) => code(() => portal.files.readBytes(documents, "plan.md", { direct: true, alone: true, likeParent: true, chats }));
+    // The kernel: the first agent cannot read it, the second can.
+    assert.notEqual((await portal.sandbox.run("led", ["cat", path.join(documents, "plan.md")], { cwd: "/" })).code, 0, "the chat\'s agent cannot read the second agent\'s home");
+    assert.equal((await portal.sandbox.run("second-own", ["cat", path.join(documents, "plan.md")], { cwd: "/" })).code, 0);
+    // The portal asks the same of the agent each chat is run as, not of the one whose home the path leads into.
+    assert.equal(asked(["led"]), "invalid", "the chat whose stored path leads there is its own agent\'s, which has no right to it");
+    assert.equal(read(["led"]), "invalid");
+    assert.equal(asked(["second-own"]), "none");
+    assert.equal(read(["second-own"]), "none");
+    assert.equal(asked(["routine-led"]), "invalid", "a session that is not a task is its own agent\'s too");
+    assert.equal(read(["routine-led"]), "invalid");
+    assert.deepEqual(portal.chats.inFolder(workspace).map((chat) => chat.id).sort(), ["led", "second-own"], "one session for each workspace stored that leads to the folder: the task and the routine run share one");
+    assert.ok(!portal.chats.list().some((chat) => chat.id === "routine-led"), "which the list of tasks leaves out");
+    assert.equal(asked(["led", "second-own"]), "invalid", "every chat\'s agent must be able to");
+    assert.equal(read(["led", "second-own"]), "invalid");
+    assert.equal(asked([]), "invalid", "no chat named: the agent is not taken from the path");
+    assert.equal(asked(["no-such-chat"]), "invalid");
+    assert.equal(asked(undefined), "invalid");
+    // Without the option the portal reads it as ever, for the page.
+    assert.equal(portal.files.readBytes(documents, "plan.md", { direct: true }).bytes.toString(), "# second\'s own");
+    assert.ok(shared > 0);
+  } finally {
+    saveSandboxPolicy({ ...policy, enabled: false });
+  }
+});
+
+test("with the sandbox on, a folder with a thousand sessions is checked as fast as one with a few: the agents asked are those of the stored workspaces, not one lookup for each session", { skip: noSandbox }, async () => {
+  const exists = (kind, name) => spawnSync("getent", [kind, name]).status === 0;
+  if (!exists("group", "pi-sandbox")) execFileSync("groupadd", ["--gid", "10010", "pi-sandbox"]);
+  if (!exists("passwd", "pi-tools")) execFileSync("useradd", ["--uid", "10002", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", "pi-tools"]);
+  const shared = Number(execFileSync("getent", ["group", "pi-sandbox"], { encoding: "utf8" }).split(":")[2]);
+  await host.syncServerHalves([write(MODULE)]);
+  const { portal } = seen();
+  const { parsePolicy, saveSandboxPolicy, defaultRules } = await import("../dist/sandbox/policy.js");
+  const policy = parsePolicy({ enabled: true, rules: defaultRules(), trusted: [] });
+  saveSandboxPolicy(policy);
+  const project = path.join(process.env.WORKSPACE_ROOT, "many-sessions");
+  const documents = path.join(project, "documents");
+  mkdirSync(documents, { recursive: true });
+  reachable(project);
+  for (const where of [project, documents]) execFileSync("sh", ["-c", `chown 0:${shared} ${where} && chmod 2775 ${where}`]);
+  // One task chat, and a routine that made a fresh session for each of a thousand runs in the project: none is pruned.
+  createSession({ id: "many-task", title: "Task", workspace: project, executor: "host" });
+  for (let n = 0; n < 1000; n++) createSession({ id: `many-run-${n}`, title: `Run ${n}`, workspace: project, executor: "host", kind: "routine", routine_slug: "many" });
+  // And a thousand other stored paths that lead to it, links an agent can make in the workspace root (a routine\'s workspace is kept as it is written).
+  const links = path.join(process.env.WORKSPACE_ROOT, "many-sessions-links");
+  mkdirSync(links, { recursive: true });
+  for (let n = 0; n < 1000; n++) {
+    symlinkSync(project, path.join(links, `l${n}`));
+    createSession({ id: `many-link-${n}`, title: `Link ${n}`, workspace: path.join(links, `l${n}`), executor: "host", kind: "routine", routine_slug: "many" });
+  }
+  try {
+    const chats = portal.chats.inFolder(portal.chats.folder("many-task")).map((chat) => chat.id);
+    assert.ok(chats.length <= 2, `${chats.length} sessions are named for one stored workspace`);
+    const call = () => portal.files.folder(project, "documents", { direct: true, likeParent: true, chats });
+    assert.equal(call(), documents);
+    // What a listing does is dozens of these, and the portal waits for each (they are synchronous): their processor time, not the wall clock which a busy machine stretches.
+    const before = process.cpuUsage();
+    for (let n = 0; n < 40; n++) call();
+    const used = process.cpuUsage(before);
+    const ms = (used.user + used.system) / 1000;
+    assert.ok(ms < 1000, `forty checks took ${Math.round(ms)} ms of processor time`);
+  } finally {
+    saveSandboxPolicy({ ...policy, enabled: false });
+  }
+});
+
+test("chats.inFolder gives the sessions of every kind whose stored workspace leads to the folder, and chats.list the tasks alone", async () => {
+  await host.syncServerHalves([write(MODULE)]);
+  const { portal } = seen();
+  const folder = path.join(process.env.WORKSPACE_ROOT, "in-folder");
+  const elsewhere = path.join(process.env.WORKSPACE_ROOT, "elsewhere");
+  mkdirSync(folder, { recursive: true });
+  mkdirSync(elsewhere, { recursive: true });
+  const link = path.join(process.env.WORKSPACE_ROOT, "in-folder-link");
+  execFileSync("ln", ["-s", folder, link]);
+  for (const [id, workspace, kind] of [["if-task", folder, "task"], ["if-agent", folder, "agent"], ["if-routine", folder, "routine"], ["if-heartbeat", link, "heartbeat"], ["if-other", elsewhere, "routine"]]) {
+    createSession({ id, title: id, workspace, executor: "host", kind, ...(kind === "routine" ? { routine_slug: "r" } : {}) });
+  }
+  // One session for each agent that has some there (all of these are the first agent\'s: they are in the workspace root, none in an agent\'s home).
+  const first = portal.chats.inFolder(portal.chats.folder("if-task"));
+  assert.equal(first.length, 1, "the sessions made for these stored paths are run as one agent");
+  assert.ok(["if-task", "if-agent", "if-routine", "if-heartbeat"].includes(first[0].id));
+  assert.deepEqual(portal.chats.inFolder(portal.chats.folder("if-other")).map((chat) => chat.id), ["if-other"]);
+  assert.deepEqual(portal.chats.inFolder(path.join(process.env.WORKSPACE_ROOT, "nobody-here")), []);
+  // Sessions are not pruned: a routine that makes a fresh session for each run keeps every one. A thousand of them in a folder are not a thousand agents to ask.
+  for (let n = 0; n < 1000; n++) createSession({ id: `fresh-${n}`, title: `Run ${n}`, workspace: folder, executor: "host", kind: "routine", routine_slug: "r" });
+  const many = portal.chats.inFolder(folder);
+  assert.equal(many.length, 1, `${many.length} sessions stand for the agents of a thousand sessions of one stored workspace`);
+  // And an agent can make many stored paths that lead to one folder (links in the workspace root, each a routine\'s workspace): they are one agent still.
+  const links = path.join(process.env.WORKSPACE_ROOT, "many-links");
+  mkdirSync(links, { recursive: true });
+  for (let n = 0; n < 1000; n++) {
+    symlinkSync(folder, path.join(links, `l${n}`));
+    createSession({ id: `link-run-${n}`, title: `Link ${n}`, workspace: path.join(links, `l${n}`), executor: "host", kind: "routine", routine_slug: "r" });
+  }
+  const afterLinks = portal.chats.inFolder(folder);
+  assert.ok(afterLinks.length <= 2, `${afterLinks.length} sessions stand for the agents of a thousand stored paths that lead to one folder`);
+  const listed = portal.chats.list().map((chat) => chat.id);
+  assert.ok(listed.includes("if-task") && !listed.includes("if-agent") && !listed.includes("if-routine") && !listed.includes("if-heartbeat"));
+});
+
+test("a server half that fails to stop, or never finishes stopping or starting, holds up nothing else", async () => {
+  host.setLimits(300, 300);
+  try {
+    const other = { name: "other", version: "1.0.0", file: path.join(pkg, "other.js"), rev: "1" };
+    writeFileSync(other.file, "export default function (portal) { portal.router.get('/ok', (_req, res) => res.json({ ok: true })); }");
+
+    // One whose stop rejects: said, and the rest of what was asked is still done.
+    await host.syncServerHalves([write("  return async () => { throw new Error('cannot stop'); };"), other]);
+    assert.equal((await fetch(at("/api/x/other/ok"))).status, 200);
+    await host.syncServerHalves([write("  return () => new Promise(() => {});"), other]);
+    assert.equal(host.isServing(NAME), true, "stopped, for all its stop said, and its next one started");
+
+    // One whose stop never finishes: given up on after a moment.
+    const began = Date.now();
+    await host.syncServerHalves([write("  await new Promise(() => {});"), other]);
+    assert.ok(Date.now() - began < 3000, "neither is waited for longer than it is given");
+    // And one that never finishes starting: not running, with why, and the other untouched.
+    assert.equal(host.isServing(NAME), false);
+    assert.match(host.serverFailure(NAME), /had not finished starting/);
+    assert.equal(host.isServing("other"), true);
+    assert.equal((await fetch(at("/api/x/other/ok"))).status, 200);
+
+    // What is asked next is done: nothing waits behind the one that hung.
+    await host.syncServerHalves([write("  // fine again")]);
+    assert.equal(host.isServing(NAME), true);
+    assert.equal(host.isServing("other"), false);
+    await host.serversSettled();
+  } finally {
+    host.setLimits(15_000, 5_000);
+  }
+});

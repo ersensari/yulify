@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
-import { addLocale, ENGLISH, formatDate, formatDateTime, formatsFor, formatTime, labelOf, languages, loadLanguage, offerLocale, resolve, selfName, setLanguage, t, tc, tp, tx, type Locale, type Plural } from "../web/src/i18n.ts";
+import { addLocale, ENGLISH, formatDate, formatDateTime, formatsFor, formatTime, labelOf, languages, loadLanguage, offerLocale, resolve, selfName, setLanguage, t, tc, tp, tx, type Locale, type Plural } from "../core/web/src/i18n.ts";
 
-const SRC = path.resolve(import.meta.dirname, "../web/src");
+const SRC = path.resolve(import.meta.dirname, "../core/web/src");
 const LOCALES = path.join(SRC, "locales");
 
 const sources = (dir: string): string[] =>
@@ -15,15 +15,15 @@ const sources = (dir: string): string[] =>
     return /\.tsx?$/.test(e.name) && !e.name.endsWith(".d.ts") ? [p] : [];
   });
 
-/** Every text the code shows, as it is written there, and whether it is a count's. */
-function texts(): Map<string, { plural: boolean; where: string }> {
+/** Every text the code in `dir` shows, as it is written there, and whether it is a count's. */
+function texts(dir = SRC): Map<string, { plural: boolean; where: string }> {
   const found = new Map<string, { plural: boolean; where: string }>();
-  for (const file of sources(SRC)) {
+  for (const file of sources(dir)) {
     const src = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
     const literal = (e: ts.Expression | undefined) => (e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : undefined);
     const visit = (n: ts.Node) => {
       if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) {
-        const where = `${path.relative(SRC, file)}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
+        const where = `${path.relative(dir, file)}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
         const name = n.expression.text;
         if (name === "t" || name === "tx" || name === "msg") {
           const key = literal(n.arguments[0]);
@@ -65,6 +65,32 @@ test("every language has every text the code shows, and nothing it no longer doe
     const stale = Object.keys(locale.strings).filter((k) => !want.has(k));
     assert.deepEqual(missing.map((k) => `${want.get(k)!.where}: ${k}`), [], `${file} lacks these`);
     assert.deepEqual(stale, [], `${file} has these the code no longer shows`);
+  }
+});
+
+test("an extension of the portal's own that speaks German has every text it shows, and nothing it no longer does", async () => {
+  // Its texts are its own (`portal.locale.add`), kept in its src/de.ts, and shown by its `t`, or marked with `msg` for later.
+  const root = path.resolve(import.meta.dirname, "../extensions");
+  const speaking = fs.readdirSync(root).filter((name) => fs.existsSync(path.join(root, name, "src", "de.ts")));
+  assert.ok(speaking.includes("terminal"));
+  for (const name of speaking) {
+    const want = texts(path.join(root, name, "src"));
+    const { de } = (await import(path.join(root, name, "src", "de.ts"))) as { de: Record<string, string | Plural> };
+    const missing = [...want.keys()].filter((k) => !(k in de));
+    const stale = Object.keys(de).filter((k) => !want.has(k));
+    assert.deepEqual(missing.map((k) => `${want.get(k)!.where}: ${k}`), [], `${name} lacks these`);
+    assert.deepEqual(stale, [], `${name} has these its code no longer shows`);
+    for (const [key, said] of Object.entries(de)) {
+      // A count's forms, as the portal's own are checked: each fills in only what is given, `other` all of it.
+      if (want.get(key)?.plural) {
+        assert.equal(typeof said, "object", `${name}: "${key}" is a count, with a form for each number`);
+        const known = new Set([...words(key), "n"]);
+        for (const text of Object.values(said as Plural)) for (const w of words(text!)) assert.ok(known.has(w), `${name}: "${key}" fills in {${w}}`);
+      } else {
+        assert.equal(typeof said, "string", `${name}: "${key}" is no count`);
+        assert.deepEqual(words(said as string), words(key), `${name}: ${key}`);
+      }
+    }
   }
 });
 

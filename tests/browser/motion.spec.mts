@@ -2,8 +2,11 @@ import { type Page } from '@playwright/test';
 import { test, expect, mockPortal } from './portal-mock';
 import { settled } from './settled';
 
+// An extension's panel beside the portal's own: the portal's tests' stand-in for one.
+test.use({ installed: ['tests/fixtures/extensions/console', 'tests/fixtures/extensions/viewer'] });
+
 /**
- * The extra animations (web/src/motion.ts): on by default, one switch to turn
+ * The extra animations (core/web/src/motion.ts): on by default, one switch to turn
  * them off, the system's reduced motion over it, and what they do to the page —
  * which is nothing the page has to wait for. The config presets the switch to
  * off for every other spec; this one starts as a fresh browser does.
@@ -70,13 +73,11 @@ async function portal(page: Page, { off = false, confirms = true, places, many =
     }
     if ((m = p.match(/^\/api\/sessions\/(\w+)$/))) return state.sessions.find((s) => s.id === m![1]) ?? {};
     if (/^\/api\/sessions\/\w+\/(config|models)$/.test(p)) return { live: false, state: { model: { id: 'm', name: 'Model', provider: 'x' }, thinkingLevel: 'medium' }, stats: null, thinking: { levels: ['off', 'medium'] }, models: { models: [] }, named: { provider: null, model: null } };
-    if (/^\/api\/sessions\/\w+\/files$/.test(p)) return { path: '', entries: [], truncated: false };
-    if (p.endsWith('/canvases')) return [];
     if (p.endsWith('/background')) return { jobs: [], statuses: [] };
     if (p === '/api/projects') return { root: '/w', home: '/w', projects: [] };
     if (p === '/api/workspaces') return { root: '/w', workspaces: [] };
     if (p === '/api/models') return { models: [], providers: {} };
-    if (p === '/api/features/flags') return { subagent: { enabled: false }, understory: { enabled: false } };
+    if (p === '/api/features/flags') return { subagent: { enabled: false }, memory: { held: false, by: null } };
     if (p === '/api/settings') return { settings: {}, defaults: {}, stored: {}, executor: 'host', workspaceRoot: '/w', piSettingsPath: '/p/settings.json', compaction: { keepRecentTokens: 20000 }, contextDefault: null };
     if (p === '/api/extensions') return { extensions: [], settingsPath: '/p/settings.json' };
     if (/report/.test(p)) return { targets: [], default: null };
@@ -292,7 +293,7 @@ test('a panel drops away when it is closed, and a carried one flies to its new p
   await page.setViewportSize({ width: 1300, height: 760 });
   await portal(page);
   await page.goto('/s/a');
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Console', exact: true }).click();
   const aside = page.locator('aside[data-dock="right"]');
   await expect(aside).toBeVisible();
   await settled(page);
@@ -311,7 +312,7 @@ test('a panel drops away when it is closed, and a carried one flies to its new p
   expect((await played(page)).filter((p) => p.ghost)).toEqual([]);
   await settled(page);
 
-  await page.getByRole('button', { name: 'Close the terminal' }).click();
+  await page.getByRole('button', { name: 'Close Console' }).click();
   await expect(page.locator('aside[data-dock]')).toHaveCount(0);
   expect((await played(page)).some((p) => p.ghost && p.keys.includes('opacity'))).toBe(true);
 });
@@ -351,24 +352,24 @@ test('with the switch off none of it is made: no doors, no pictures, no animatio
 
 test('closing one of two places plays that place, not the other that stays', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 800 });
-  // Files at the left, the terminal at the right.
-  await portal(page, { places: { files: 'left' } });
+  // The viewer at the left, the console at the right.
+  await portal(page, { places: { 'x:test-viewer/viewer': 'left' } });
   await page.goto('/s/a');
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
-  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByRole('button', { name: 'Console', exact: true }).click();
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
   await expect(page.locator('aside[data-dock="right"]')).toBeVisible();
   await expect(page.locator('aside[data-dock="left"]')).toBeVisible();
   await settled(page);
 
-  await page.getByRole('button', { name: 'Close the terminal' }).click();
+  await page.getByRole('button', { name: 'Close Console' }).click();
   await expect(page.locator('aside[data-dock="right"]')).toHaveCount(0);
-  // What went was the terminal's place; the files stay where they are.
+  // What went was the console's place; the viewer stays where it is.
   await expect.poll(async () => (await pictures(page)).map((p) => p.dock)).toEqual(['right']);
   await expect(page.locator('aside[data-dock="left"]')).toBeVisible();
   await settled(page);
 
   // And the one that stayed drops away in its turn when it goes.
-  await page.getByRole('button', { name: 'Close the files' }).click();
+  await page.getByRole('button', { name: 'Close Viewer' }).click();
   await expect(page.locator('aside[data-dock]')).toHaveCount(0);
   await expect.poll(async () => (await pictures(page)).map((p) => p.dock)).toEqual(['right', 'left']);
 });
@@ -501,7 +502,7 @@ test('a panel that has flown to its place does not come in again', async ({ page
   await page.setViewportSize({ width: 1300, height: 760 });
   await portal(page);
   await page.goto('/s/a');
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Console', exact: true }).click();
   const aside = page.locator('aside[data-dock="right"]');
   await expect(aside).toBeVisible();
   await settled(page);
@@ -558,7 +559,6 @@ test("the Stop button of voice mode is there at once when a run starts, and the 
   await page.route('**/api/sessions/test/commands', (route) => route.fulfill({ json: { commands: [] } }));
   await page.route('**/api/sessions/test/config', (route) => route.fulfill({ status: 503, json: {} }));
   await page.route('**/api/voice', (route) => route.fulfill({ json: { enabled: true } }));
-  await page.route('**/api/browser', (route) => route.fulfill({ json: { install: { container: 'running' } } }));
   await page.setViewportSize({ width: 1400, height: 860 });
   await page.goto('/tests/voice.html');
   await page.evaluate(() => { document.documentElement.dataset.motion = 'fancy'; });
@@ -859,10 +859,10 @@ test('a menu that opens Settings as it closes drops away under the dialog', asyn
 
 test('a conversation that is left is under the floating window that lies over it', async ({ page }) => {
   await page.setViewportSize({ width: 1300, height: 760 });
-  await portal(page, { places: { terminal: 'float' } });
+  await portal(page, { places: { 'x:test-console/console': 'float' } });
   await page.goto('/s/a');
   await expect(page.getByText('A answer 5')).toBeVisible();
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'Console', exact: true }).click();
   await expect(page.locator('aside[data-dock="float"]')).toBeVisible();
   await settled(page);
 
@@ -897,17 +897,17 @@ test('deleting a message with many rows in its turn still breaks the message its
 
 test('closing the window at the back of two does not bring it in front of the other', async ({ page }) => {
   await page.setViewportSize({ width: 1300, height: 760 });
-  await portal(page, { places: { terminal: 'float', files: 'float' } });
+  await portal(page, { places: { 'x:test-console/console': 'float', 'x:test-viewer/viewer': 'float' } });
   await page.goto('/s/a');
   await expect(page.getByText('A answer 5')).toBeVisible();
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
-  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByRole('button', { name: 'Console', exact: true }).click();
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
   await expect(page.locator('aside[data-dock="float"]')).toHaveCount(2);
   await settled(page);
-  const files = page.locator('aside[data-dock="float"]', { hasText: 'Files' });
-  const z = Number(await files.evaluate((el) => getComputedStyle(el).zIndex));
+  const viewer = page.locator('aside[data-dock="float"]', { hasText: 'Viewer' });
+  const z = Number(await viewer.evaluate((el) => getComputedStyle(el).zIndex));
 
-  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
   await expect(page.locator('aside[data-dock="float"]')).toHaveCount(1);
   await expect.poll(async () => (await pictures(page)).filter((p) => p.dock === 'float').length).toBeGreaterThan(0);
   const seen = (await pictures(page)).find((p) => p.dock === 'float')!;

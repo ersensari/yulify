@@ -69,10 +69,11 @@ A destination is a conversation that already exists — you pick "telegram —
 Sam Rivera", not a chat id. Only channels that can start a conversation appear;
 a webhook cannot, because it only ever answers a request that is already open.
 
-A routine created from a chat reports back **into that chat** — asking for a
-morning summary in Telegram means "tell me here". The portal-wide default
-applies to routines created any other way, and to conversations whose channel
-cannot be messaged out of the blue.
+A routine created from a conversation that came through a channel reports back
+**into that conversation** — asking for a morning summary in Telegram means
+"tell me here". The portal-wide default applies to routines created any other
+way, a chat in the portal's own pages included, and to conversations whose
+channel cannot be messaged out of the blue.
 
 What a routine says into a conversation becomes part of it. Ask "what did you
 mean by that?" the next morning and the agent knows what "that" was, because the
@@ -97,8 +98,13 @@ they say**. Fetching the logs taints the session, and the fix is a push. Greppin
 those logs for the word `token` looks like reading credentials. Nothing is
 wrong, and the run stops anyway.
 
-**Injection guard** on a routine's page turns the blocking off for that routine
-alone. Two things stay:
+**Settings → Guard** lets that routine alone do what a rule holds back, one rule
+at a time: the log-fixing routine above needs `publish` and maybe
+`read-credentials` off, and nothing else. Every other rule still holds for it,
+and its runs read the change at their next call. The routine's own page says how
+its rules stand, with a link to change them. A routine from before the Guard page
+whose one switch was off is exempt from every rule until you switch some back on.
+Two things stay:
 
 - Untrusted content is still labelled as untrusted, so the agent knows what it
   is reading. That half never gets in the way.
@@ -111,23 +117,63 @@ agent to read it. Exempt the routine that needs it, leave the rest alone, and
 read the audit occasionally.
 :::
 
-## The browser
+## Tools
 
-**Browser** on a routine's page lets its runs drive the agent's
-[browser](/guide/browser), which is signed into the agent's own accounts. It is
-off by default, and every page a run opens is recorded in
-[Audit](/guide/sessions#audit).
+**Tools** on a routine's page is the same list a chat's tools control and a
+project's show, grouped the same way (built in, each extension, each MCP
+server). What you switch there is what every run of the routine starts with,
+saved as each switch is flipped, apart from the form's **Save**. A routine's
+switches are exceptions to what the layers under it leave, both ways: a tool on
+where they have it off, off where they have it on. A tool the routine never
+mentioned keeps following them, so a later change to the default still reaches it.
+
+The layers, each an exception to the one before it:
+
+1. **Settings → Tools**, the default for every conversation;
+2. **the agent** whose home the routine runs in (see [Agents](/guide/agents#tools));
+3. **the project** it runs in (see [Projects](/guide/projects#tools));
+4. **the routine**;
+5. **the run's own chat**, which can still switch a tool for itself and has the last word.
+
+An agent and a project do not both apply to one place: a project is under the
+workspace root, an agent's home is not.
+
+Deleting a routine takes its layer with it. The chats of its runs are kept, and a
+person who goes on with one has what the layers under the routine's leave, and
+what that chat switched itself: a tool the routine had off is on again there
+where those layers have it on.
+
+### The browser
+
+The [browser](/guide/browser)'s tools, Browser's group (`pithagoras-browser`) in
+that list, are tools like any other here: having them is having the browser,
+which is signed into the agent's own accounts, and a routine's runs have them as
+the layers above say until the routine switches them. A new routine has them
+wherever a chat in its place would. To keep routines away from the browser
+unless one is switched on for it, switch the group off in Settings → Tools and on
+where it is wanted: in the routines that need it, and in chats, projects or
+agents. A routine had a **Browser** switch of its own once,
+which held them off unless it was on: a portal upgraded from then has what each
+routine's switch said written into its tools (see
+[Upgrading](/guide/upgrading#browser-is-an-extension)). Every page a run opens
+is recorded in [Audit](/guide/sessions#audit).
 
 ## Letting the agent manage them
 
-Sessions reached through a channel get `routines_list`, `routine_create`,
-`routine_update` and `routine_run`, so "remind me every morning to check the
-backups" writes the routine instead of telling you where the button is. They are
-for you: a routine runs as you, so a colleague or a guest cannot make, change or
-run one through the agent, whatever is [allowed](/people/rules) for them.
+Your conversations with an agent get `routines_list`, `routine_create`,
+`routine_update` and `routine_run`: a chat started with **+** or **New** in an
+agent's home, a chat on the Agents page, and a conversation that came through a
+channel. So "remind me every morning to check the backups" writes the routine
+instead of telling you where the button is. They are for you: a routine runs as
+you, so a colleague or a guest cannot make, change or run one through the agent,
+whatever is [allowed](/people/rules) for them. A routine made from a chat runs in
+the home of the agent you asked, unless you name a project, and one made from a chat
+in the portal reports to the portal-wide default (see
+[Reporting back](#reporting-back)), as such a chat has no channel to answer on.
 
-Task sessions do not get them — a session working inside your repository has no
-business rescheduling anything. Neither does a routine run: a routine that can
+A chat working in a project or any other folder that is not an agent's home does
+not get them — a session working inside your repository has no business
+rescheduling anything. Neither does a routine run: a routine that can
 create routines can build a chain with nobody watching it.
 
 There is no delete tool. Disabling stops a routine firing and leaves it visible,

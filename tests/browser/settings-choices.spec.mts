@@ -1,6 +1,6 @@
 import { type Page } from '@playwright/test';
 import { test, expect, mockPortal } from './portal-mock';
-import { DEFAULT_ORB } from '../../server/src/orb-style';
+import { DEFAULT_ORB } from '../../core/server/src/orb-style';
 
 /**
  * What the Settings pages and the audit page say to a screen reader about their
@@ -107,7 +107,6 @@ test('the auto-compact switch in the context card says it is a switch, and its s
     '/api/sessions/a': chat,
     '/api/sessions/a/config': config,
     '/api/sessions/a/models': config,
-    '/api/sessions/a/canvases': [],
     '/api/workspaces': { root: '/w', workspaces: [] },
     '/api/models': { models: [], providers: {} },
   });

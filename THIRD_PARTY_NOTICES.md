@@ -105,3 +105,27 @@ Files: `ort-wasm-simd-threaded.mjs` and `ort-wasm-simd-threaded.wasm`, from the 
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
+
+## Image copies in the Media extension (sharp and libvips)
+
+The Media extension (`extensions/media`), which the portal ships, makes the small copies of its gallery's pictures, and scales pictures down for an edit, with the npm package `sharp` 0.35.5 (https://github.com/lovell/sharp), which is licensed under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). It does not ship in the web app's `voice-assets/`; it is installed with the extension, from the extension's own lock file, and so it is in the Docker image.
+
+sharp runs on libvips (https://github.com/libvips/libvips), which comes prebuilt in the npm packages `@img/sharp-libvips-<platform>` that the extension's `npm ci` installs next to it, as the shared library `libvips-cpp`. libvips is licensed under the GNU Lesser General Public License, version 3 or later (LGPL-3.0-or-later), and the library bundles other libraries, among them glib, libexif and libheif, under the LGPL 3 or compatible licences. The texts are not repeated here:
+
+- GNU Lesser General Public License, version 3: https://www.gnu.org/licenses/lgpl-3.0.txt (it builds on the GNU General Public License, version 3: https://www.gnu.org/licenses/gpl-3.0.txt)
+- the licences of the libraries inside the prebuilt libvips, and their versions: https://github.com/lovell/sharp-libvips/blob/main/THIRD-PARTY-NOTICES.md
+- the source code of libvips: https://github.com/libvips/libvips, and of the build: https://github.com/lovell/sharp-libvips
+
+libvips is used unchanged and is linked dynamically: it can be replaced by another build of the library, either by installing another `@img/sharp-libvips-<platform>` package of the same major version or by pointing sharp at a libvips of the system (see https://sharp.pixelplumbing.com/install#custom-libvips).
+
+## The browser driver of the Browser extension (playwright-core)
+
+The Browser extension (`extensions/browser`), which comes with the portal, drives the agent's browser over its debugging port with the npm package `playwright-core` 1.63.0 (https://github.com/microsoft/playwright), which is licensed under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). It does not ship in the web app's `voice-assets/`; it is installed with the extension, from the extension's own lock file, and so it is in the Docker image. Its NOTICE file says:
+
+    Playwright
+    Copyright (c) Microsoft Corporation
+
+    This software contains code derived from the Puppeteer project (https://github.com/puppeteer/puppeteer),
+    available under the Apache 2.0 license (https://github.com/puppeteer/puppeteer/blob/master/LICENSE).
+
+The package bundles other npm packages into files under its `lib/`. Their licences are in the package itself, which is used unchanged: `ThirdPartyNotices.txt`, and a `<file>.js.LICENSE` beside each bundled file with the full text of each licence.

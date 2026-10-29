@@ -2,8 +2,9 @@
 FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-COPY server/package.json server/
-COPY web/package.json web/
+COPY core/server/package.json core/server/
+COPY core/web/package.json core/web/
+COPY packages/extension-api/package.json packages/extension-api/
 # better-sqlite3 ships a binding.gyp, and npm defaults to node-gyp for any
 # package that has one without its own install script. This stage is thrown
 # away, so it gets a real toolchain and every dependency's install script runs
@@ -13,10 +14,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 # npm ci takes exactly what package-lock.json says, and stops when it and a
 # package.json disagree, where npm install would quietly resolve the difference.
 RUN npm ci
-COPY server server
-COPY web web
-# The web build copies it next to the voice files it covers (web/scripts/copy-vad-assets.mjs).
+COPY core core
+# What an extension written in TypeScript is built with: @pithagoras/extension-api,
+# and the script that builds each extension that has a build of its own.
+COPY packages packages
+COPY scripts scripts
+# The extensions: `npm run build` builds each that has a build of its own, in its folder.
+COPY extensions extensions
+# The web build copies it next to the voice files it covers (core/web/scripts/copy-vad-assets.mjs).
 COPY THIRD_PARTY_NOTICES.md ./
+# Creator mode's build copies the extension guide into its skill's reference (extensions/creator/build.mjs).
+COPY docs/guide/extension-ui.md docs/guide/extension-ui.md
 RUN npm run build
 
 FROM node:22-slim
@@ -30,7 +38,18 @@ WORKDIR /app
 # stuck — a restart keeps them — and then vanish on the next rebuild.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git openssh-client ca-certificates curl wget \
+      sudo ripgrep fd-find file \
     && rm -rf /var/lib/apt/lists/*
+
+# The sandbox (Settings → Sandbox, off until switched on): each agent's commands
+# and file tools run as a user of its own, which the portal makes as needed,
+# trusted commands as pi-tools through sudo, and pi-sandbox owns what the agents
+# share. Fixed ids, so what they own on the data volume still belongs to them
+# after a rebuild. sudo, rg, fd and file are for the same: trusted commands, pi's
+# grep and find searching as the agent, and pi's read telling a picture by its
+# bytes as the agent.
+RUN groupadd --gid 10010 pi-sandbox \
+    && useradd --uid 10002 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pi-tools
 
 # uv, so the agent can run Python tooling — a large share of MCP servers are
 # Python and are launched with uvx. Static musl binaries, no Python needed to
@@ -39,12 +58,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /uvx /usr/local/bin/
 
 COPY package.json package-lock.json ./
-COPY server/package.json server/
+COPY core/server/package.json core/server/
 # No toolchain here, and none needed: better-sqlite3 ships prebuilt binaries
 # and resolves them at require time. Skipping install scripts keeps the runtime
 # image slim instead of carrying a compiler for a binary that already exists.
 # The cache goes in the same layer, or its tarballs stay in the image.
-RUN npm ci --omit=dev -w server --ignore-scripts \
+RUN npm ci --omit=dev -w core/server --ignore-scripts \
     && npm cache clean --force
 
 # The pi on PATH is the one the portal's sessions run, from the lock, so that
@@ -53,8 +72,10 @@ RUN npm ci --omit=dev -w server --ignore-scripts \
 RUN ln -s /app/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
     && chmod +x /app/node_modules/@earendil-works/pi-coding-agent/dist/cli.js
 
+COPY --from=build /app/core/server/dist core/server/dist
+COPY --from=build /app/core/web/dist core/web/dist
+# Where the portal was started from before it moved to core/: `node server/dist/reset-password.js` and the like still work.
 COPY --from=build /app/server/dist server/dist
-COPY --from=build /app/web/dist web/dist
 
 # The builtin channel packages. Loaded from here at runtime; third-party ones
 # are installed into CHANNELS_DIR on the data volume instead, so they survive
@@ -64,11 +85,17 @@ COPY channels channels
 # Skills the portal ships. Loaded from here for every session; anything the
 # agent writes goes to the data volume instead.
 COPY skills skills
-# The opt-in pi extensions the portal ships (the subagent tool). Nothing loads
-# them until a feature is switched on in Settings → Add-ons, which installs one
-# as a local pi package pointing here.
-COPY extensions extensions
-COPY deploy/voice deploy/voice
+# The extensions the portal ships, as the build left them: each built in its own
+# folder, where nothing of it is kept in git. Nothing loads one until it is
+# installed as a local pi package pointing here (Settings → Extensions, or
+# Settings → Tools for the subagent tool). One with packages of its own gets
+# what it needs to run and not what only its build did, so a new container does
+# not reach for the registry.
+COPY --from=build /app/extensions extensions
+RUN for dir in extensions/*/; do \
+      if [ -f "${dir}package-lock.json" ]; then npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$dir" || exit 1; fi; \
+    done \
+    && npm cache clean --force
 
 # HOME lives on the data volume so pi packages and settings (~/.pi/agent)
 # survive image rebuilds instead of being silently wiped.
@@ -89,5 +116,5 @@ ENV NODE_ENV=production \
 RUN mkdir -p /data/home /data/bin
 EXPOSE 4100
 VOLUME /data
-CMD ["/usr/local/bin/node", "server/dist/index.js"]
+CMD ["/usr/local/bin/node", "core/server/dist/index.js"]
 LABEL forgeloop.managed="true" forgeloop.project="forgeloop-ai" forgeloop.resource="yulify-image"

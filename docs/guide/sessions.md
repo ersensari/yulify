@@ -5,7 +5,8 @@ folder it works in. It is the normal unit of work in the portal.
 
 ## Where a session works
 
-**New** starts a chat in **Home**, the first agent's own directory; a chat in a
+**New** starts a chat with the agent picked for new chats, in **Home** (the first
+agent's own directory) by default; a chat in a
 project works in that project's folder, and a chat with another agent in that
 agent's home. See [Projects](/guide/projects) and [Agents](/guide/agents). The session is named after its
 first message, and you can rename it.
@@ -22,7 +23,12 @@ not wait for the work to finish. Close the tab if you like.
 While a run is in progress you can keep typing. Words sent mid-run steer it: the
 agent takes them in after the step it is on, instead of when the whole run is
 over. Until then the message sits in the transcript marked *Waiting — goes in
-after the current step*. A message that did not get that far — the run was
+after the current step*. While it waits it can be changed: press ↑ in an empty
+box to take the latest waiting message back into the box (with its pictures) and
+send it again when you are done, or use the buttons under it to delete it or to
+**send it directly**, which stops the run and sends that message at once, with
+the others still waiting going in behind it in their order. Once the agent has
+taken a message in, it can no longer be taken back. A message that did not get that far — the run was
 stopped, or the portal restarted, before the agent took it in — says so and has
 a button to send it again. **Stop** aborts the current run, and pressed while pi
 is still starting for a message, it keeps that message from being sent at all:
@@ -53,7 +59,7 @@ can be a picture alone. The sent message shows them; click one to
 The model sees them, but they are not files of the chat's folder, so the agent's
 [`edit_image`](/guide/features#editing-a-picture) cannot change them: put a picture
 in the folder with the Files panel for that, or change it on the
-[Images page](/guide/images#changing-a-picture).
+[Media page](/guide/media#changing-a-picture).
 
 A photo straight off a phone is made smaller in the browser before it goes:
 2048 pixels on its longer side, as a JPEG. Models scale anything bigger down on
@@ -81,10 +87,151 @@ Two keys work from anywhere on the page:
 | `/` | Jump to the message box with the command list open. Not while you are typing somewhere else, where it is a character. It is the [command character](/guide/commands#the-command-character), so it is another key if you chose one |
 | `Esc` | In the message box, **stop the run**, whatever is typed: the words stay in the box, so it costs you nothing. Not while an input method is composing a word, and not while the command list is open, where it closes the list |
 
+## Modes
+
+A mode is how a chat works. A chat that has said nothing yet shows its mode
+on a chip above the message box, where it is offered more than one; the chip
+opens a menu with each mode and a line on what it does, and the chosen one is
+checked. Choose before the first message: from then on the chat keeps it.
+
+- **Standard mode** is the agent as the chat would have it anyway: the tools
+  that [Settings → Tools](/guide/extensions#and-what-every-chat-starts-with), its agent and its project
+  switch on. Every chat starts in it.
+- **Code mode** gives the model one tool, `codemode`, pi's
+  [code mode](/guide/extensions#code-mode): it writes a short JavaScript script
+  that calls the chat's tools, and is given only what the script puts out. The
+  other tools are not offered to the model one by one (pi's `only`
+  presentation): the code tool's description lists them, and a script calls
+  them. Every tool that is on in the chat is in a script's reach. Lazy marks do
+  not apply here, since nothing is offered one by one anyway: a script finds the
+  tools that do not fit in the description with `searchTools`, and the `tools`
+  tool is not offered. An MCP server whose tools are not registered one by one
+  stays behind the adapter's `mcp` tool, which a script calls like any other.
+  A script has no time limit; **Stop** ends it. The
+  [guard](/guide/security#marking-untrusted-output) holds each call a script
+  makes as it holds the model's own. In the chat's tools, `codemode` is on and
+  its switch cannot turn it off, with a line that says why: to work without the
+  code tool, start a chat in Standard mode. The other switches work as in any
+  chat.
+- **An extension's modes** come last, after the portal's own and
+  [yours](#modes-you-make): an installed extension can offer modes of its own,
+  and what such a mode does is the extension's
+  ([Chat modes](/guide/extension-ui#chat-modes)). One that asks first is shown
+  in the warning colour, and is chosen only after you say yes to its warning,
+  which [Audit](#audit) keeps as *Mode chosen*. A chat in the mode of an
+  extension that is switched off or removed keeps its mode, shown as not
+  available, and works without what the extension gave it until the extension
+  is back. [Creator mode](/guide/creator-mode), which comes with the portal, is
+  one that asks first: in it the agent writes extensions and installs them.
+
+The mode is fixed once the chat has said something: its first message, or a
+command sent to pi. Leaving a mode means starting a new chat; `/new` and
+`/clear` start one in Standard mode. A chat whose every message was removed has
+said nothing again, and its mode can be chosen again. Changing it before then
+lets the chat's pi go if one was started (opening the model menu starts it), so
+that the first message starts it again in the mode chosen; nothing is lost, as
+the chat has said nothing. A subagent the chat starts does not take its mode.
+
+Modes are offered in the chats you start on the portal's pages, and in the
+conversations started on an agent's page, where pi runs in the portal's own
+process. A routine's run, a heartbeat, a chat that came through a channel and
+a chat a colleague speaks in have none, and a portal started with
+`EXECUTOR=container` offers none.
+
+Once the chat has started, the chip goes, and the chat's header shows its mode,
+with its line when you point at it. Standard mode shows nothing there. A mode
+that is not offered now is named by the last part of what the chat stores, and
+says it is not available now when you point at it.
+
+### Modes you make
+
+You can make modes of your own in **Settings → Modes**, or with **New mode…**,
+the last row of the menu above the message box, which opens that page over the
+chat. The menu offers yours after Standard and Code mode, by their names. A
+chat in one stores `custom/` and the id the mode was given from its first name;
+naming it again later keeps the id.
+
+A mode of yours has:
+
+- **Name** and **Description**: what the menu shows. **Instructions**: said to
+  the agent in the system prompt of every chat in the mode, after the portal's
+  own rules. The three are saved with **Save**.
+- **Model** and **Effort**: written into a chat as it is put in the mode, so the
+  chat starts on them; the chat can still change them with the pills under the
+  message box. The provider and the model are written together, once a model is
+  chosen; left as **As the chat would have it**, nothing is written. Choosing
+  another mode before the first message puts back what the mode wrote, unless
+  you changed it in the chat since.
+- **Work through the code tool**: its chats work as in Code mode, the code tool
+  alone offered to the model. Switching it on switches the code tool on in the
+  mode's tools too, and switching it off takes that back: the code tool is then
+  as Settings → Tools, the chat's agent and its project leave it.
+- **Tools**: what every chat in the mode starts with, one more tool layer. It is
+  held against [Settings → Tools](/guide/extensions#and-what-every-chat-starts-with)
+  and comes above a chat's agent, project and routine, so a tool the mode leaves
+  as Settings → Tools has it is still decided by them: a mode cannot switch on,
+  over a project, a tool that Settings → Tools has on. A chat's own switches are
+  still the last word, but where the mode switches the code tool on, they cannot
+  switch it off, as in Code mode.
+
+These are saved as they are changed, except the texts.
+
+An edit reaches the chats already in the mode as follows: its tools and its
+instructions at once, from their next message; whether it works through the
+code tool when each chat's pi next starts, since which tools are offered one by
+one is fixed then; its model and effort never, as they were written into each
+chat when it was put in the mode. The code tool that switch also switches is one
+of the mode's tools, so it reaches the running chats at once: where it goes off,
+a chat that worked through it works as in Standard mode from its next message.
+
+Deleting a mode asks first. Its chats keep it, and their header says it is not
+available now; they work as in Standard mode from their next message. A new mode
+of the same name gets another id, so it does not take them over.
+
+With `EXECUTOR=container`, Settings → Modes says that tools cannot be switched,
+as Settings → Tools does.
+
+## Questions from the agent
+
+When the agent cannot go on without a decision or a fact only you have, it uses
+its `ask_question` tool: its questions appear in the chat, just above the
+message box (not over the page, so the rest of the chat stays usable), and the
+agent waits for your answers. A question is one of four kinds: **choose
+one**, **choose several**, **free text**, or **put the options in order** (best
+first, moved with the arrows; they start in the order the agent listed them,
+and that order only counts as your answer once you have moved something or
+pressed **Keep this order**). A question the agent asks without options is
+answered in free text.
+A choice may also take an answer of your own when the agent allows it, and a
+question marked *optional* may be left empty. **Submit** is available once every
+other question is answered. **Cancel** puts the questions away, and the agent
+is told that you did not answer.
+
+The agent waits for as long as it takes: there is no time limit by default. It
+ends when you answer, when you cancel, or when you press Stop in the message
+box, which also takes the questions away in every window that has them. If you
+would rather the agent carries on by itself after a while, **Settings → Tools →
+Questions from the agent** sets a limit of 5, 15, 30 or 60 minutes. The portal
+keeps a question with its chat until it ends: after a reload, a visit to
+another chat or a restart of the portal it is there again. Answered while the
+portal restarts or after, your answers reach the agent as a new message once the
+portal is back. Once it ends, the chat
+keeps a short record of it where it was asked: each question and your answer,
+or that it was cancelled or not answered in time.
+
+The tool exists wherever you answer in the portal's own pages: in your chats,
+and in the conversations you start on the Agent page. It does not exist in a
+routine, a heartbeat or a chat reached through a channel, where nobody could
+answer in the web UI: there the agent asks in plain text, and the person
+answers with their next message. It is in the tools list like any other, in a
+group named `ask-question`, and can be switched off there.
+
 ## Looking at a picture
 
-The pictures the agent shows with `show_image` are drawn under their tool line,
-in the middle of the conversation, with the same room above and below. One it
+What a call gives you is drawn under its tool line, in the middle of the
+conversation, with the same room above and below: a picture (from `show_image`,
+or from any tool that [gives one](/guide/extension-ui#files-a-tool-gives)), a
+clip in its player, and any other file as a link that saves it. A picture the agent
 makes with `generate_image` or changes with `edit_image` has no tool line: it is
 the [preview](#pictures-the-agent-makes) that held its place while it was made,
 in the middle of the conversation as well. A very wide or very tall picture is
@@ -184,9 +331,10 @@ edit meant to replace.
 
 ## Pictures the agent makes
 
-With the [Images add-on](/guide/features#image-generation) on, a `generate_image`
+With [image generation](/guide/features#image-generation) on, a `generate_image`
 or `edit_image` call is not shown as a tool line but as the picture itself, from
-the moment it is asked for:
+the moment it is asked for. These are [Media](/guide/media)'s cards, there while
+it is installed:
 
 - **While it is made**, a frame in the shape of the coming picture holds its
   place: the size the agent asked for, or, for an edit, the shape of the picture
@@ -217,9 +365,9 @@ the moment it is asked for:
 - **Opening a chat again** draws the pictures that were made at once, with no
   fade, in the shape asked for when the agent asked for one and otherwise
   taking their own as they load; one whose file is gone from the folder says so.
-- **A tool of the same name** that another extension brings, and which pi may
-  keep in the portal's place, is the plain tool line it always was, whatever
-  state it is in: only the portal's own calls are drawn as pictures.
+- **A tool of the same name** that another extension brings is drawn the same
+  way while Media is installed: a card goes by the tool's name, as every
+  extension's cards do, not by which extension the tool is from.
 
 The movement is one of the [animations](/guide/interface#animations): with them
 switched off, or when your system asks for reduced motion, the frame is the same
@@ -230,12 +378,35 @@ are made. In
 [voice mode](/guide/voice) the card of such a call carries the same preview as a
 small tile.
 
-Every picture the agent makes this way is also in the [Images](/guide/images) page's
+Every picture the agent makes this way is also in the [Media](/guide/media) page's
 gallery, from the moment it is saved, with the chat it is from, what it was asked for
 and how it was made. The page can open it, change it, make it again, and delete the
 file — which is the chat's, so that asks every time. What lies in these folders and was
 never listed, such as pictures made before the gallery existed, is found there too, as a
 picture of the folder.
+
+## Videos the agent makes
+
+With [video generation](/guide/features#video-generation) on, a `generate_video` call is not shown as a tool line
+either, but as the video from the moment it is asked for. A video takes minutes, so the wait is the main thing:
+
+- **While it is made**, a frame in the shape of the size the agent asked for (a square when nothing says) holds
+  the place, says "Making a video" and, after a few seconds, how long it has taken. Nothing in it pretends to know how far the
+  server is.
+- **When it is made**, the browser's own **player** takes the frame's place, with the title under it: play and pause, the slider, the
+  volume and full screen. It does not play by itself, and only the start of the file is fetched until you play it, which shows its first frame; the
+  rest comes in the parts the player asks for. The portal serves it from the chat's folder, by its path, and only what its bytes say is a WebM or an MP4.
+- **When it fails**, the frame says so quietly, with the reason in a line or two, and the whole of it under **Details**. A call that was
+  cut off, because the run was stopped or the portal restarted before the video came back, says it was interrupted.
+- **The call itself** — the tool's name and what the agent gave it: the prompt, the title, the size, the length, the first frame — is
+  under **Details**, below the player.
+- **A video the agent shows** with `show_video` is a player under its tool line, in the middle of the conversation as a picture is. One
+  whose file is gone from the folder says so.
+- **A tool of the same name** that another extension brings is drawn the same way while Media is installed: a card goes by
+  the tool's name, not by which extension the tool is from.
+
+[Voice mode](/guide/voice) has no window for videos, and while the agent has `generate_video` its voice instructions say so: a video
+is for the chat, and is made only when asked. Every video the agent makes this way is also in the [Media](/guide/media) page's gallery, from the moment it is saved.
 
 ## Drafts and what is running
 
@@ -253,24 +424,28 @@ A status that names one of the chat's slash commands runs it when clicked.
 ## Sidebar and the sessions page
 
 The sidebar opens with New, then the places — Sessions, Projects, Agents,
-Routines and [Audit](#audit), with Browser, Memory and Images added while the
-[browser](/guide/browser) is installed, [Understory](/guide/features#memory-understory)
-holds the agent's memory and an [image endpoint](/guide/images) is set up — then **Pinned**, then **Recents**. The button at its
-top edge folds it to a rail of icons; under each chat's title it shows the folder it works in. Recents is capped at twelve; anything past that is reachable from
-the Sessions page, which lists everything with search over names and workspace
-paths.
+Routines and [Audit](#audit), and the
+pages of extensions in a group of their own, **Extensions**, before Audit
+([Media](/guide/media)'s while an image endpoint or a video endpoint is set up,
+[Browser](/guide/browser)'s while there is a browser, Memory while
+[Understory](/guide/features#memory-understory) holds the agent's memory) — then **Pinned**, then
+**Recents**. The button at its
+top edge folds it to a rail of icons. A chat's full path is not drawn in the list: the folders (below) name where it works, and the Files panel shows the path on request. Recents is capped at twelve; anything past that is reachable from
+the Sessions page, which lists everything with a search of its own.
 
 Pinning is stored server-side and drives the ordering (`pinned DESC,
 updated_at DESC`), so the sidebar and the Sessions page never disagree.
 
 With more chats than the sidebar lists, it has a search field above them. It looks
-through every chat by name and folder, not only the ones shown, and Escape clears
-it. The Sessions page has the same search with more room.
+through every chat by its name, and by its folder's name where the chats are gathered by
+folder (below), not only the ones shown, and Escape clears it. A pinned chat is found by
+its name only, as its row shows no folder. It never goes by a chat's path. The Sessions page has the same search with more room; in its
+list of all chats, each row names the folder it works in.
 
 ### By folder
 
-Once there is a project, the chats below **Pinned** are gathered by the folder
-they work in: each agent's home, named after the agent, and each project, a
+Once there is a project or more than one agent, the chats below **Pinned** are
+gathered by the folder they work in: each agent's home, named after the agent, and each project, a
 chat in a project's subfolder counting as the project's. Each folder opens to show its chats — the sidebar up to eight,
 then *N more in …*, which opens the Sessions page at that folder — and remembers
 whether it was left open. The folder of the chat you open is opened for you. A
@@ -482,11 +657,15 @@ and, for a tool, which tool and what it was asked to do:
 | --- | --- |
 | Refused | The agent was stopped from doing something |
 | Allowed by rule | A [standing rule](/people/rules) let it through |
-| Allowed by approval | Somebody [approved it](/people/approvals) |
+| Allowed by approval | Somebody [approved it](/people/approvals), or you said yes in the chat to a call [held after a suspected prompt injection](/guide/security#asked-or-refused) |
 | Turned away | A stranger on a channel was refused |
 | You answered | A question from the agent was answered |
-| Page opened | The agent's [browser](/guide/browser) was pointed at a page |
-| `allowed-by-exemption` | A routine whose [injection guard](/guide/routines#the-injection-guard) is off did something the guard would have stopped |
+| Address reached | A tool went to an address: the agent's [browser](/guide/browser) was pointed at a page, or a tool that [declares `reaches`](/guide/extension-ui#what-the-guard-holds-a-tool-to) was given one |
+| `allowed-by-exemption` | A routine [let off a rule](/guide/routines#the-injection-guard) did something that rule would have stopped |
+| `revoked` | An approval not yet spent was taken back in Settings → Guard |
+| `untrusted` | A flagged result you had trusted was untrusted in Settings → Guard, and holds its chat back again |
+| Mode chosen | A chat was put in an extension's [mode that asks first](#modes), after you said yes to its warning: the mode's name, and what the chat stores |
+| Extension | An extension [recorded something it did](/guide/extension-ui#a-row-in-audit), by its name: what it was done to, and what was done |
 | Log cleared | Somebody emptied the log, and how many entries went |
 
 The buttons above the list filter it: **Everything**, **Refused**, **Allowed**

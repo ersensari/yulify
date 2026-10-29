@@ -24,14 +24,7 @@ const answers: Record<string, unknown> = {
   '/api/tool-rules': { rules: [] },
   '/api/channels': { channels: [], kinds: [], agentHome: '/a/home' },
   '/api/skills': { skills: [{ name: 'release-notes', description: 'How releases are cut', editable: true, enabled: true, source: 'user', path: '/a/skills/release-notes' }], diagnostics: [], root: '/a/skills' },
-  '/api/browser': {
-    running: false, unprotected: false, connectedAs: null, version: null, pages: [], uiPort: '3011', cursor: true, allowlist: '', configured: false, byDefault: true, sessions: [], routines: [],
-    install: { available: true, mode: 'docker', image: false, container: 'absent', binary: '/usr/bin/chromium', pulling: { active: false, line: '' } }, config: { user: 'abc', hasPassword: true },
-  },
-  '/api/voice': { enabled: false, whisperUrl: 'http://127.0.0.1:8178/inference', breezeUrl: 'http://127.0.0.1:7860/v1/audio/speech', instruction: 'Clear speech', voice: 'design', runtime: 'breeze', language: 'auto', cfgScale: 4 },
-  '/api/voice/install': { available: true, state: 'absent', busy: false, progress: '', error: '' },
-  '/api/voice/presets': [],
-  '/api/voice/hardware': { gpus: [], source: 'none', error: '', checked: false, cpuOnly: false, host: { totalMiB: 16384, freeMiB: 12000, threads: 8 }, selected: null, reserveMiB: 0, suggestion: { tts: 'breeze', asr: 'whisper', asrModel: 'base' } },
+  '/api/voice': { provider: '', ready: false, speech: true, voices: [], enabled: false },
   '/api/features/subagent': { subagent: { available: true, installed: false, enabled: false, source: null, mode: 'interrupt', maxParallel: 1, model: 'auto' } },
   '/api/audit': { entries: [{ id: 2, at: '2026-10-01T09:00:00Z', kind: 'refused', tool: 'bash', subject: 'rm -rf /', reason: 'on the list', person_key: null, person_name: null, session_id: null }] },
   '/api/projects': { root: '/w', home: '/h', projects: [{ name: 'demo', path: '/w/demo', isGit: false, hasInstructions: false, hasTools: false, sessions: 0, lastActive: null }] },
@@ -116,33 +109,21 @@ test('Settings → Skills does not say there are none when the list could not be
   await failsThenRecovers(page, 'skills', ['/api/skills'], { shown: 'release-notes', gone: 'None yet.' });
 });
 
-test('Settings → Add-ons: each add-on says what it could not read, and reads it again', async ({ page }) => {
-  const { up, asked } = await portal(page, ['/api/browser', '/api/voice', '/api/features/subagent', '/api/features']);
-  await page.goto('/settings/add-ons');
-  const dialog = settingsDialog(page);
-  await expect(dialog.getByRole('alert')).toContainText(FAILED);
-  up('/api/browser');
-  await dialog.getByRole('button', { name: 'Try again' }).click();
-  await expect(dialog.getByText('A real browser with a profile that stays logged in.')).toBeVisible();
+test('Settings → Tools: the subagent tool says what it could not read, and reads it again', async ({ page }) => {
+  await failsThenRecovers(page, 'tools', ['/api/features/subagent'], { shown: 'Off: the agent has no subagent tool.' });
+});
 
-  await dialog.getByRole('tab', { name: 'Voice' }).click();
+test('Settings → Defaults → Voice mode says what it could not read, and reads it again', async ({ page }) => {
+  const { up } = await portal(page, ['/api/voice']);
+  await page.goto('/settings/general');
+  const dialog = settingsDialog(page);
+  // The rest of the page is there: only the section says what failed.
+  await expect(dialog.getByText('For new chats')).toBeVisible();
   await expect(dialog.getByRole('alert')).toContainText(FAILED);
   up('/api/voice');
   await dialog.getByRole('button', { name: 'Try again' }).click();
-  await expect(dialog.getByRole('checkbox', { name: 'Enable voice controls in sessions' })).toBeVisible();
-
-  await dialog.getByRole('tab', { name: 'Subagents' }).click();
-  await expect(dialog.getByRole('alert')).toContainText(FAILED);
-  up('/api/features/subagent');
-  await dialog.getByRole('button', { name: 'Try again' }).click();
+  await expect(dialog.getByText('Nothing listens and speaks for voice mode.', { exact: false })).toBeVisible();
   await expect(dialog.getByRole('alert')).toHaveCount(0);
-
-  // The memory page asks for the features, which are still down: it says so as well.
-  await dialog.getByRole('tab', { name: 'Memory' }).click();
-  await expect(dialog.getByRole('alert')).toContainText(FAILED);
-  const before = asked.filter((p) => p === '/api/features').length;
-  await dialog.getByRole('button', { name: 'Try again' }).click();
-  await expect.poll(() => asked.filter((p) => p === '/api/features').length).toBeGreaterThan(before);
 });
 
 test('the Audit page does not say nothing was recorded, with "0 refused", when it could not be read', async ({ page }) => {
@@ -172,7 +153,9 @@ test('the Projects page offers to read the list again instead of a placeholder f
   await expect(page.getByRole('alert')).toContainText(FAILED);
   up('/api/projects');
   await page.getByRole('button', { name: 'Try again' }).click();
-  await expect(page.getByText('/w/demo')).toBeVisible();
+  // The list shows a project by its name; the folder's path is not drawn (issue #120).
+  await expect(page.getByRole('main').getByText('demo', { exact: true })).toBeVisible();
+  await expect(page.getByText('/w/demo')).toHaveCount(0);
 });
 
 test('Settings → Tools tells a deployment without tool switches from a portal that did not answer', async ({ page }) => {

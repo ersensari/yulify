@@ -2,8 +2,8 @@ import { type Locator, type Page } from '@playwright/test';
 import { test, expect, mockPortal, DONE } from './portal-mock';
 
 /**
- * The picture viewer in the chat (web/src/components/ImageViewer.tsx) over the fixture's
- * four pictures (web/tests/chat.tsx, `phase=pictures`): one the person sent, one the agent
+ * The picture viewer in the chat (core/web/src/components/ImageViewer.tsx) over the fixture's
+ * four pictures (core/web/tests/chat.tsx, `phase=pictures`): one the person sent, one the agent
  * made, one it made from that, and one it showed without a title.
  */
 
@@ -558,7 +558,7 @@ async function openApp(page: Page, ids: string[], { collapsed = true } = {}) {
   const events = [
     ev('portal_prompt', { message: 'Paint a lighthouse.' }),
     ev('tool_execution_start', { toolCallId: 'g1', toolName: 'generate_image', args: { prompt: 'A lighthouse' } }),
-    ev('tool_execution_end', { toolCallId: 'g1', toolName: 'generate_image', result: { content: [{ type: 'text', text: 'Generated' }], details: { path: 'generated-images/lighthouse.png', title: 'A lighthouse at dusk', portalImage: true } } }),
+    ev('tool_execution_end', { toolCallId: 'g1', toolName: 'generate_image', result: { content: [{ type: 'text', text: 'Generated' }], details: { files: [{ path: 'generated-images/lighthouse.png', title: 'A lighthouse at dusk' }] } }, portalFiles: [{ path: 'generated-images/lighthouse.png', kind: 'picture', title: 'A lighthouse at dusk' }] }),
     ev('message_end', { message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] } }),
     ev('agent_end'),
   ];
@@ -576,8 +576,6 @@ async function openApp(page: Page, ids: string[], { collapsed = true } = {}) {
       return DONE;
     }
     if (/^\/api\/sessions\/\w+\/(config|models)$/.test(p)) return { live: false, state: { model: { id: 'm', name: 'Model', provider: 'x' }, thinkingLevel: 'medium' }, stats: null, thinking: { levels: ['off', 'medium'] }, models: { models: [] }, named: { provider: null, model: null } };
-    if (/^\/api\/sessions\/\w+\/files$/.test(p)) return { path: '', entries: [], truncated: false };
-    if (p.endsWith('/canvases')) return [];
   }, { streams: 'none', settings: true });
   await page.addInitScript(({ events, collapsed }) => {
     if (collapsed) localStorage.setItem('sidebarCollapsed', 'true');

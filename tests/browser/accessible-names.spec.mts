@@ -1,6 +1,6 @@
 import { type Locator, type Page } from '@playwright/test';
 import { test, expect, mockPortal, reply, HANG } from './portal-mock';
-import { DEFAULT_ORB } from '../../server/src/orb-style';
+import { DEFAULT_ORB } from '../../core/server/src/orb-style';
 import { unnamed } from './a11y';
 
 /**
@@ -19,7 +19,7 @@ const skill = { name: 'review', description: 'Reviews', path: '/s/review', scope
 const person = (key: string, name: string, role: string) => ({ key, name, role, notes: '', first_seen: '', last_seen: null, announced_at: null, renamed: 0 });
 const mcp = { path: '/a/mcp.json', exists: true, adapterInstalled: true, adapterSpec: 'npm:pi-mcp-adapter', settings: {}, raw: '{}', parseError: null, servers: [{ name: 'notes', entry: { command: 'notes-mcp' }, transport: 'stdio', disabled: false }] };
 const extension = { spec: 'npm:ext', name: 'Ext', version: '1', description: '', enabled: true, settings: [{ key: 'apiKey', value: '', configured: false }], skills: [], tools: [] };
-const routine = { id: 'r1', slug: 'morning', name: 'Morning', enabled: true, schedule: '0 9 * * *', runAt: null, mode: 'repeats', done: false, instructions: 'Say hello', freshSession: true, guard: true, browser: false, workspace: null, reportChannel: null, reportTarget: null, lastReportAt: null, lastRun: null, lastStatus: null, lastOutput: null, lastMs: null, nextRun: null, createdAt: '' };
+const routine = { id: 'r1', slug: 'morning', name: 'Morning', enabled: true, schedule: '0 9 * * *', runAt: null, mode: 'repeats', done: false, instructions: 'Say hello', freshSession: true, guard: true, exempt: [], workspace: null, reportChannel: null, reportTarget: null, lastReportAt: null, lastRun: null, lastStatus: null, lastOutput: null, lastMs: null, nextRun: null, createdAt: '' };
 
 async function portal(page: Page) {
   await mockPortal(page, ({ path: p, method }) => {
@@ -32,7 +32,12 @@ async function portal(page: Page) {
     if (p === '/api/mcp') return mcp;
     if (p === '/api/extensions') return { settingsPath: '/a/settings.json', extensions: [extension] };
     if (p === '/api/routines') return { routines: [routine] };
+    if (p === '/api/guard') return { running: true, sandbox: 'on', primary: true, approvalsTo: true, rules: [], servers: [], routines: [], allowlist: 'github.com', approvals: [], trusted: [] };
     if (p === '/api/routines/preview') return { runs: [] };
+    // A routine's and an agent's own tool switches: the list of checkboxes the page draws, which have to be named too.
+    if (p === '/api/routines/r1/tools' || p === '/api/agents/home/tools') {
+      return { tools: [{ name: 'bash', source: 'built in', enabled: true, defaultOn: true }, { name: 'notes_search', source: 'notes', enabled: false, defaultOn: true, cached: true }], live: false, off: ['notes_search'], names: {} };
+    }
     if (p === '/api/workspaces') return { root: '/w', workspaces: [{ name: 'site', path: '/w/site', isGit: true }] };
     if (p === '/api/projects') return { root: '/w', home: '/h', projects: [{ name: 'site', path: '/w/site', isGit: true, sessions: 0, hasInstructions: false, hasTools: false }] };
     if (p === '/api/pi-settings') return { path: '/a/settings.json', content: '{}' };
@@ -56,15 +61,17 @@ const scenes: Scene[] = [
   { name: 'MCP servers', url: '/settings/mcp', shows: (page) => page.getByText('notes').first() },
   { name: 'an MCP server', url: '/settings/mcp', open: (page) => page.getByRole('button', { name: /notes/ }).first().click(), shows: (page) => page.getByPlaceholder('filesystem', { exact: true }) },
   { name: 'a new MCP server', url: '/settings/mcp', open: (page) => page.getByRole('button', { name: 'Add server' }).click(), shows: (page) => page.getByPlaceholder('filesystem', { exact: true }) },
-  { name: 'extensions', url: '/settings/extensions', shows: field('Install by name') },
+  { name: 'extensions', url: '/settings/extensions', shows: (page) => page.getByRole('switch', { name: 'Switch off Ext' }) },
+  { name: 'extensions to install', url: '/settings/extensions', open: (page) => page.getByRole('tab', { name: 'Discover' }).click(), shows: field('Install by name') },
   { name: 'advanced', url: '/settings/advanced', shows: field('settings.json') },
   { name: 'sessions', url: '/sessions', shows: field(/Search by name/) },
   { name: 'agents', url: '/agents', shows: (page) => page.getByText('Home').first() },
+  { name: "an agent's tools", url: '/agents?agent=home&tab=tools', open: (page) => page.getByRole('button', { name: /^notes/ }).click(), shows: (page) => page.getByRole('checkbox').first() },
   { name: 'an agent', url: '/agents?agent=home&tab=files', open: (page) => page.getByRole('button', { name: 'SOUL.md' }).click(), shows: field('SOUL.md') },
   { name: 'routines', url: '/routines', shows: (page) => page.getByText('Morning').first() },
   { name: 'a routine', url: '/routines', open: (page) => page.getByRole('button', { name: /Morning/ }).first().click(), shows: field('Routine name') },
   { name: 'a new routine', url: '/routines', open: (page) => page.getByRole('button', { name: 'New routine' }).click(), shows: field('Schedule') },
-  { name: 'browser', url: '/browser', shows: field('Where it may go') },
+  { name: 'the guard', url: '/settings/guard', shows: field("Sites the agent's tools may reach") },
 ];
 for (const { name, url, open, shows } of scenes) {
   test(`every field and button on ${name} has a name`, async ({ page }) => {
@@ -94,7 +101,6 @@ async function chat(page: Page, answer: Parameters<typeof mockPortal>[1] = () =>
     if (p === '/api/sessions') return { sessions: [session], executor: 'host' };
     if (p === '/api/sessions/a') return session;
     if (p === '/api/sessions/a/config' || p === '/api/sessions/a/models') return config;
-    if (p === '/api/sessions/a/canvases') return [];
   }, { streams: 'open', settings: true });
   await page.goto('/s/a');
   await expect.poll(() => page.evaluate(() => (window as any).streams.some((s: any) => !s.closed))).toBe(true);

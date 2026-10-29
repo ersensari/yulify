@@ -1,5 +1,7 @@
 # Docker add-ons
 
+> Historical Yulify v0.1 add-ons guide: v0.2 uses extensions. These instructions are not verified for the integration; see [Extensions](/guide/extensions) and [Docker](/guide/docker).
+
 Yulify can install and manage **Browser** and **Voice** from **Settings → Add-ons**. Each runs in its own container on the same Docker host as Yulify.
 
 The portal talks directly to the host Docker API; no Docker CLI inside the portal and no Docker-in-Docker daemon are required.

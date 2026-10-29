@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { COMPACTION_PHRASES, HandsFreeVoice, THINKING_PHRASES, type VoiceIO } from '../web/src/hands-free.js';
-import { addLocale, setLanguage } from '../web/src/i18n.js';
-import { samplesWav } from '../web/src/voice.js';
+import { COMPACTION_PHRASES, HandsFreeVoice, THINKING_PHRASES, type VoiceIO } from '../core/web/src/hands-free.js';
+import { addLocale, setLanguage } from '../core/web/src/i18n.js';
+import { samplesWav } from '../core/web/src/voice.js';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 const reply = (id: string, done = true) => ({ kind: 'assistant' as const, id, text: 'A spoken answer.', thinking: '', done });
@@ -423,7 +423,7 @@ test('a merged reply is read while the agent is still writing it, in requests of
 });
 
 test('the tail of its own reply coming back into the microphone is not heard as a request', async () => {
-  const { echoOf } = await import('../web/src/hands-free.js');
+  const { echoOf } = await import('../core/web/src/hands-free.js');
   const said = 'The weather in Istanbul is sunny today, with a high of twenty degrees and a light wind from the north.';
   assert.equal(echoOf('light wind from the north', said), true, 'the last words, in a row');
   assert.equal(echoOf('with a high of twenty degrees and light wind from the north', said), true, 'a word lost or changed by the recognizer');
@@ -443,4 +443,53 @@ test('speech made of what was just said is dropped while a reply plays and just 
   voice.speechStart(); voice.speechEnd(new Float32Array(16000)); await tick(); await tick();
   assert.deepEqual(sent, ['what about tomorrow']);
   voice.stop();
+});
+
+test('an error in the chat is said once in one short line, and one from before voice mode is not', async () => {
+  const { voice, spoken } = setup();
+  const failure = (id: string) => ({ kind: 'notice' as const, id, text: 'Model error: overloaded', tone: 'error' as const });
+  // a10 is where voice mode began: n5 is older, n11 and n12 are new.
+  voice.observe([failure('n5'), reply('a10')]); await tick();
+  assert.deepEqual(spoken, []);
+  voice.observe([failure('n5'), reply('a10'), failure('n11')]); await tick();
+  assert.deepEqual(spoken, ['An error occurred.']);
+  voice.observe([failure('n5'), reply('a10'), failure('n11')]); await tick();
+  assert.equal(spoken.length, 1);
+  voice.observe([failure('n5'), reply('a10'), failure('n11'), { kind: 'notice' as const, id: 'n12', text: 'Aborted', tone: 'info' as const }]); await tick();
+  assert.equal(spoken.length, 1);
+  voice.observe([failure('n5'), reply('a10'), failure('n11'), failure('n13')]); await tick();
+  assert.deepEqual(spoken, ['An error occurred.', 'An error occurred.']); voice.stop();
+});
+
+test('an error is said whatever the status settings say', async () => {
+  for (const patch of [{ statusSpeech: false }, { sequential: true }]) {
+    const { voice, spoken } = setup(patch);
+    voice.observe([reply('a10'), { kind: 'notice' as const, id: 'n11', text: 'Model error: overloaded', tone: 'error' as const }]); await tick();
+    assert.deepEqual(spoken, ['An error occurred.']); voice.stop();
+  }
+});
+
+test('an error that comes in while the user speaks is not said, not even after the speech is cancelled', async () => {
+  const { voice, spoken } = setup();
+  voice.speechStart();
+  voice.observe([reply('a10'), { kind: 'notice' as const, id: 'n11', text: 'Model error: overloaded', tone: 'error' as const }]); await tick();
+  assert.deepEqual(spoken, []);
+  voice.speechCancel(); await tick();
+  voice.observe([reply('a10'), { kind: 'notice' as const, id: 'n11', text: 'Model error: overloaded', tone: 'error' as const }]); await tick();
+  assert.deepEqual(spoken, []); voice.stop();
+});
+
+test('the error of a turn the agent refused is said, although replies are off after the failed send', async () => {
+  const { voice, spoken, errors } = setup({ send: async () => { throw new Error('example has no API key.'); } });
+  voice.speechStart(); voice.speechEnd(new Float32Array(16000)); await tick(); await tick(); await tick();
+  assert.deepEqual(errors, ['Could not send “hello”: example has no API key.']);
+  voice.observe([reply('a10'), { kind: 'notice' as const, id: 'n12', text: 'example has no API key.', tone: 'error' as const }]); await tick();
+  assert.deepEqual(spoken, ['An error occurred.']); voice.stop();
+});
+
+test('the error line is asked for as its own kind, which the page plays from a file instead of asking the speech model', async () => {
+  const kinds: (string | undefined)[] = [];
+  const { voice } = setup({ synthesize: async (_text, _signal, kind) => { kinds.push(kind); return async () => {}; } });
+  voice.observe([reply('a10'), { kind: 'notice' as const, id: 'n11', text: 'Model error: overloaded', tone: 'error' as const }]); await tick();
+  assert.deepEqual(kinds, ['error']); voice.stop();
 });

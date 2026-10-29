@@ -1,20 +1,22 @@
 import { test, expect } from './portal-mock';
 import { settled } from './settled';
 import { readFileSync } from 'node:fs';
+
+// An extension's window at the side: the portal's tests' stand-in for one, opening on each command the agent runs.
+test.use({ installed: ['tests/fixtures/extensions/console'] });
 const sample = readFileSync(new URL('../fixtures/jfk.wav', import.meta.url));
+// What the portal answers a phrase with: 24 kHz PCM, here the fixture's samples.
+const speech = { body: sample.subarray(sample.indexOf('data') + 8), headers: { 'content-type': 'audio/pcm', 'x-sample-rate': '24000' } };
 // A 2×2 PNG, as a picture from the phone or the folder would be.
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==', 'base64');
 
 test.beforeEach(async ({ page }) => {
-  await page.route('**/api/browser', route => route.fulfill({ json: { running: false, sessions: [], install: { container: 'stopped' } } }));
   await page.route('**/api/sessions/test/commands', route => route.fulfill({ json: { commands: [] } }));
   await page.route('**/api/sessions/test/config', route => route.fulfill({ status: 503, json: {} }));
   await page.route('**/api/voice', route => route.fulfill({ json: { enabled: true } }));
   await page.route('**/test-speech.wav', route => route.fulfill({ body: sample, contentType: 'audio/wav' }));
-  await page.route('**/voice/speech', route => route.fulfill({ body: sample, contentType: 'audio/wav' }));
+  await page.route('**/voice/speech', route => route.fulfill(speech));
   await page.route('**/api/sessions/test/picture?**', route => route.fulfill({ body: png, contentType: 'image/png' }));
-  await page.route('**/api/sessions/test/files?**', route => route.fulfill({ json: { path: 'src', entries: [{ name: 'app.ts', type: 'file', size: 3, mtime: 1 }], truncated: false } }));
-  await page.route('**/api/sessions/test/file?**', route => route.fulfill({ json: { binary: false, size: 3, mtime: 1, content: 'abc' } }));
 });
 
 async function start(page: import('@playwright/test').Page) {
@@ -49,63 +51,18 @@ test('a picture goes with what is said next, and the agent can show one back', a
   expect(failures).toEqual([]);
 });
 
-test('a picture the agent had generated is drawn in the chat as a preview, and in the voice picture window', async ({ page }) => {
-  const failures: string[] = [];
-  page.on('pageerror', e => failures.push(e.message));
-  const asked: string[] = [];
-  await page.route('**/api/sessions/test/picture?**', route => { asked.push(new URL(route.request().url()).searchParams.get('path') ?? ''); return route.fulfill({ body: png, contentType: 'image/png' }); });
-  await page.goto('/tests/voice.html');
-  // In the chat: the picture in its preview, fetched from the chat's folder like one that was shown.
-  await page.getByRole('button', { name: 'Generate picture' }).click();
-  const thumbnail = page.getByTestId('workspace').getByRole('img', { name: 'A lighthouse at dusk' });
-  await expect(thumbnail).toBeVisible();
-  await expect.poll(() => asked).toContain('generated-images/image-20261001-101500-a1b2c3.png');
-  // In place of the tool card, with the call under Details.
-  await expect(page.getByTestId('workspace').getByRole('button', { name: 'Details' })).toBeVisible();
-  await expect(page.getByTestId('workspace').getByRole('button', { name: /^generate_image/ })).toHaveCount(0);
-
-  // In voice mode: the picture window opens on the next one, and keeps the earlier.
-  await page.getByRole('button', { name: 'Turn on hands-free voice' }).click();
-  await expect(page.getByRole('button', { name: 'End voice mode' })).toBeVisible({ timeout: 25000 });
-  await page.getByRole('button', { name: 'Generate picture' }).click();
-  const window = page.getByRole('region', { name: 'Pictures' });
-  await expect(window.getByRole('img', { name: 'A lighthouse at dusk' })).toBeVisible();
-  await expect(window).toContainText('A lighthouse at dusk');
-  await expect(window).toContainText('2 / 2');
-  expect(failures).toEqual([]);
-});
-
-test("in voice mode a card for generate_image leads to the pictures only when the portal's tool made one", async ({ page }) => {
+test("a card is the same element from its call's start to its end, only a button once the call has given a picture", async ({ page }) => {
   await start(page);
-  // An extension's tool of that name: its card says what it does and opens nothing, whatever pictures there are.
-  // A picture shown before is there to be opened wrongly; its window is put away.
-  await page.getByRole('button', { name: 'Show picture' }).click();
-  await page.getByRole('region', { name: 'Pictures' }).getByRole('button', { name: 'Minimize pictures' }).click();
-  await page.getByRole('button', { name: "Call an extension's generate_image" }).click();
-  const theirs = page.locator('.voice-tool-float', { hasText: 'A cat on a sofa' });
-  await expect(theirs).toContainText('Making a picture');
-  expect(await theirs.evaluate(card => card.tagName)).toBe('DIV');
-  await expect(page.getByRole('button', { name: /Making a picture/ })).toHaveCount(0);
-  await expect(page.getByRole('region', { name: 'Pictures' })).toHaveCount(0);
-
-  // The portal's own, once its picture is there: tapping the card shows it.
-  await page.getByRole('button', { name: 'Generate picture' }).click();
-  const ours = page.getByRole('button', { name: /Making a picture/ });
-  await expect(ours).toHaveAttribute('title', 'Show the picture');
-});
-
-test("a generate_image card is the same element from its start to its end, only a button once its picture is there", async ({ page }) => {
-  await start(page);
-  // The real order: the call starts, the model works, and some time later the picture arrives.
-  await page.getByRole('button', { name: 'Start generating a picture' }).click();
-  const card = page.locator('.voice-tool-float', { hasText: 'A foggy harbour at first light' });
-  await expect(card).toContainText('Making a picture');
+  // The real order: the call starts, the tool works, and some time later the picture arrives.
+  await page.getByRole('button', { name: 'Start a chart' }).click();
+  const card = page.locator('.voice-tool-float', { hasText: 'A chart of the sales, month by month' });
+  await expect(card).toContainText('Using plot sales');
   await expect(card).not.toHaveAttribute('role', 'button');
   await expect(card).not.toHaveAttribute('title', /.+/);
   // The element is marked, so that a new one drawn in its place would be told by not having the mark.
   await card.evaluate(element => { element.setAttribute('data-first-element', 'yes'); });
 
-  await page.getByRole('button', { name: 'Finish generating the picture' }).click();
+  await page.getByRole('button', { name: 'Finish the chart' }).click();
   await expect(card).toHaveAttribute('role', 'button');
   await expect(card).toHaveAttribute('title', 'Show the picture');
   await expect(card).toHaveAttribute('data-first-element', 'yes');
@@ -114,7 +71,7 @@ test("a generate_image card is the same element from its start to its end, only 
   await page.getByRole('region', { name: 'Pictures' }).getByRole('button', { name: 'Minimize pictures' }).click();
   await card.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('region', { name: 'Pictures' }).getByRole('img', { name: 'A foggy harbour' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Pictures' }).getByRole('img', { name: 'Sales by month' })).toBeVisible();
 });
 
 test('a file dropped on the voice stage is taken there once, not again by the chat behind it', async ({ page }) => {
@@ -140,17 +97,19 @@ test('a file dropped on the voice stage is taken there once, not again by the ch
 
 test('tool cards say what came of a call, and open what they are about', async ({ page }) => {
   await start(page);
-  // The terminal can be opened before the agent has run anything.
-  await page.getByRole('button', { name: 'Show terminal' }).click();
-  await expect(page.getByLabel('Agent terminal output')).toContainText('No commands yet');
-  await page.getByRole('button', { name: 'Minimize terminal' }).click();
+  // The console can be opened before the agent has run anything.
+  await page.getByRole('button', { name: 'Show console' }).click();
+  await expect(page.getByLabel('Console output')).toContainText('No commands yet');
+  await page.getByRole('button', { name: 'Minimize console' }).click();
   await page.getByRole('button', { name: 'Start search' }).click();
   const search = page.locator('.voice-tool-float', { hasText: 'Searching for “retry”' });
   await expect(search).toBeVisible();
   // Still there after the old eight seconds would have faded it, counting.
   await page.waitForTimeout(4200);
   await expect(search).toContainText(/\d+ s/);
+  // What came of an edit; what its card opens is the window of an extension that says it is for files (Files').
   await page.getByRole('button', { name: 'Edit file' }).click();
+  await expect(page.locator('.voice-tool-float', { hasText: 'Editing app.ts' })).toContainText('+2 −1');
   const edit = page.getByRole('button', { name: /Editing app\.ts/ });
   await expect(edit).toContainText('+2 −1');
   await edit.click();
@@ -207,14 +166,14 @@ test('settings, push-to-talk, adding to a running task, the conversation and rep
   await settings.getByRole('group', { name: 'Push to talk' }).getByRole('button', { name: 'On' }).click();
   expect(await page.evaluate(() => [localStorage.getItem('voiceRate'), localStorage.getItem('voiceSteer'), localStorage.getItem('voicePtt')])).toEqual(['1.5', 'on', 'on']);
   await page.keyboard.press('Escape');
-  // With the canvas open beside the stage, the card is still on top of it.
-  await page.getByRole('button', { name: 'Session canvases' }).click();
-  await expect(page.getByLabel('Session canvas workspace')).toBeVisible();
+  // With a window an extension brought open on the stage, the card is still on top of it.
+  await page.getByRole('button', { name: 'Show console' }).click();
+  await expect(page.getByRole('region', { name: 'Console', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Voice settings' }).click();
   const card = await settings.boundingBox();
   expect(await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest('.voice-settings'), [card!.x + card!.width / 2, card!.y + 20])).toBe(true);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Close canvas' }).click();
+  await page.getByRole('button', { name: 'Minimize console' }).click();
   await expect(settings).toBeHidden();
   await expect(page.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
   // Once the repeated reply (the fixture's long clip) has finished.
@@ -266,9 +225,9 @@ test('everything in voice mode has a key, and the keys can be changed', async ({
   await expect(page.getByRole('button', { name: 'Mute microphone' })).toBeVisible();
   // Windows open and close.
   await page.keyboard.press('t');
-  await expect(page.getByLabel('Agent terminal output')).toBeVisible();
+  await expect(page.getByLabel('Console output')).toBeVisible();
   await page.keyboard.press('t');
-  await expect(page.getByRole('button', { name: 'Show terminal' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Show console' })).toBeVisible();
   await page.keyboard.press('c');
   await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toHaveClass(/is-open/);
   await page.keyboard.press('c');
@@ -322,16 +281,16 @@ test('everything in voice mode has a key, and the keys can be changed', async ({
 
 test('windows can be resized by their edges, until the windows are arranged anew', async ({ page }) => {
   await start(page);
-  await page.getByRole('button', { name: 'Show terminal' }).click();
-  const terminal = page.locator('.voice-terminal-window');
+  await page.getByRole('button', { name: 'Show console' }).click();
+  const consoleWindow = page.locator('.voice-extension-window[data-extension="test-console"]');
   await settled(page);
-  const before = (await terminal.boundingBox())!;
-  const grip = (await terminal.locator('.resize-sw').boundingBox())!;
+  const before = (await consoleWindow.boundingBox())!;
+  const grip = (await consoleWindow.locator('.resize-sw').boundingBox())!;
   await page.mouse.move(grip.x + 8, grip.y + 8);
   await page.mouse.down();
   await page.mouse.move(grip.x - 80, grip.y + 8 - 60, { steps: 6 });
   await page.mouse.up();
-  const after = (await terminal.boundingBox())!;
+  const after = (await consoleWindow.boundingBox())!;
   expect(after.width).toBeGreaterThan(before.width + 60);
   expect(after.height).toBeLessThan(before.height - 40);
   // The right edge stayed where it was.
@@ -339,32 +298,32 @@ test('windows can be resized by their edges, until the windows are arranged anew
   // Another window: the layout places both again.
   await page.getByRole('button', { name: 'Show the conversation' }).click();
   await settled(page);
-  expect(await terminal.evaluate(el => el.style.width)).toBe('');
+  expect(await consoleWindow.evaluate(el => el.style.width)).toBe('');
 });
 
 test('a window is sized from its corner with the arrow keys, and Home hands it back to the layout', async ({ page }) => {
   await start(page);
-  await page.getByRole('button', { name: 'Show terminal' }).click();
-  const terminal = page.locator('.voice-terminal-window');
+  await page.getByRole('button', { name: 'Show console' }).click();
+  const consoleWindow = page.locator('.voice-extension-window[data-extension="test-console"]');
   await settled(page);
-  const before = (await terminal.boundingBox())!;
+  const before = (await consoleWindow.boundingBox())!;
   // One grip of the five is reached with Tab: the corner.
-  const grip = terminal.getByRole('button', { name: 'Resize the window' });
+  const grip = consoleWindow.getByRole('button', { name: 'Resize the window' });
   await expect(grip).toHaveCount(1);
   await grip.focus();
   // Smaller, where it already fills the stage to the dock.
   await page.keyboard.press('Shift+ArrowLeft');
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('ArrowUp');
-  await expect(terminal).toHaveAttribute('data-sized', 'pin');
-  const after = (await terminal.boundingBox())!;
+  await expect(consoleWindow).toHaveAttribute('data-sized', 'pin');
+  const after = (await consoleWindow.boundingBox())!;
   expect(after.width).toBeCloseTo(before.width - 96, 0);
   expect(after.height).toBeCloseTo(before.height - 48, 0);
   // The corner moved, not the window: its left edge stayed.
   expect(after.x).toBeCloseTo(before.x, 0);
   await page.keyboard.press('Home');
-  await expect(terminal).not.toHaveAttribute('data-sized', /.+/);
-  expect(await terminal.evaluate(el => el.style.width)).toBe('');
+  await expect(consoleWindow).not.toHaveAttribute('data-sized', /.+/);
+  expect(await consoleWindow.evaluate(el => el.style.width)).toBe('');
 });
 
 test('the conversation window renders a reply as markdown, also while it is written, and puts it in a speech bubble apart from what the user said', async ({ page }) => {
@@ -399,6 +358,90 @@ test('the conversation window renders a reply as markdown, also while it is writ
   }
 });
 
+test('a model error in voice mode opens the conversation on it and plays the line fetched at the start, without asking the speech model again', async ({ page }) => {
+  const asked: string[] = [];
+  await page.route('**/voice/speech', route => { asked.push(route.request().postDataJSON().text); return route.fulfill(speech); });
+  await start(page);
+  // Fetched as voice mode started, in the words it will say.
+  await expect.poll(() => asked).toEqual(['An error occurred.']);
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true });
+  await expect(page.getByRole('button', { name: 'Show the conversation' })).toBeVisible();
+  await page.getByRole('button', { name: 'Fail the model' }).click();
+  // Opened by itself, with the error written in it.
+  await expect(page.getByRole('button', { name: 'Show the conversation' })).toHaveCount(0);
+  await expect(conversation.getByRole('alert')).toHaveText('Model error: the provider is down');
+  // And said: the kept line, played from memory, not the error's own words, and not asked for again.
+  await expect(page.locator('.voice-orb')).toHaveAttribute('data-mode', 'output');
+  await settled(page);
+  expect(asked).toEqual(['An error occurred.']);
+});
+
+test('the error line is tried again while the speech model comes up', async ({ page }) => {
+  const asked: string[] = [];
+  // Not ready for the first two tries, as a speech model that is still loading.
+  await page.route('**/voice/speech', route => {
+    asked.push(route.request().postDataJSON().text);
+    return asked.length < 3 ? route.fulfill({ status: 503, json: { error: 'The speech model is loading' } }) : route.fulfill(speech);
+  });
+  await start(page);
+  await expect.poll(() => asked.length, { timeout: 10000 }).toBe(3);
+  await page.getByRole('button', { name: 'Fail the model' }).click();
+  await expect(page.locator('.voice-orb')).toHaveAttribute('data-mode', 'output');
+  await expect(page.getByText('The spoken error line is not available')).toHaveCount(0);
+  expect(asked).toEqual(['An error occurred.', 'An error occurred.', 'An error occurred.']);
+});
+
+/** Voice mode started where the error line cannot be had, with every try at it counted in `asked`. */
+async function withoutErrorLine(page: import('@playwright/test').Page) {
+  const asked: string[] = [];
+  await page.route('**/voice/speech', route => { asked.push(route.request().postDataJSON().text); return route.fulfill({ status: 503, json: { error: 'The speech model is not ready' } }); });
+  await start(page);
+  return asked;
+}
+
+test('without the line the error is shown in writing only, and said so', async ({ page }) => {
+  const asked = await withoutErrorLine(page);
+  await page.getByRole('button', { name: 'Fail the model' }).click();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true }).getByRole('alert')).toHaveText('Model error: the provider is down');
+  // Said once the tries at the start are over.
+  await expect(page.getByText('The spoken error line is not available, so the error is shown in writing only.')).toBeVisible({ timeout: 10000 });
+  // Three tries as voice mode started, and the speech model is not asked as a way round it.
+  expect(asked).toEqual(['An error occurred.', 'An error occurred.', 'An error occurred.']);
+  await expect(page.getByRole('button', { name: 'End voice mode' })).toBeVisible();
+});
+
+async function missingErrorLine(page: import('@playwright/test').Page) {
+  await withoutErrorLine(page);
+  await page.getByRole('button', { name: 'Fail the model' }).click();
+  await expect(page.getByText('The spoken error line is not available, so the error is shown in writing only.')).toBeVisible({ timeout: 10000 });
+  await page.getByRole('button', { name: 'End voice mode' }).click();
+  return page.getByRole('alert').filter({ hasText: 'The spoken error line is not available' });
+}
+
+test('the notice about the missing error line is still there after voice mode ends, then fades by itself', async ({ page }) => {
+  const notice = await missingErrorLine(page);
+  await expect(notice).toBeVisible();
+  await expect(notice).toBeHidden({ timeout: 9000 });
+});
+
+test('the notice about the missing error line goes at once when clicked', async ({ page }) => {
+  const notice = await missingErrorLine(page);
+  await expect(notice).toBeVisible();
+  await notice.click();
+  await expect(notice).toBeHidden({ timeout: 1000 });
+});
+
+test('an error from before voice mode, coming in late, does not open the conversation', async ({ page }) => {
+  await start(page);
+  await page.getByRole('button', { name: 'Replay an old error' }).click();
+  await expect(page.getByTestId('workspace')).toContainText('Model error: from yesterday');
+  await settled(page);
+  await expect(page.getByRole('button', { name: 'Show the conversation' })).toBeVisible();
+  // A new one still does.
+  await page.getByRole('button', { name: 'Fail the model' }).click();
+  await expect(page.getByRole('button', { name: 'Show the conversation' })).toHaveCount(0);
+});
+
 test('Escape in the confirmation of a link in a reply closes it and neither stops the agent nor ends voice mode', async ({ page }) => {
   await start(page);
   await page.getByRole('button', { name: 'Show the conversation' }).click();
@@ -425,4 +468,80 @@ test('the voice settings card stays inside a short screen and scrolls', async ({
   // The first row can be reached.
   await card.getByRole('group', { name: 'Speaking speed' }).scrollIntoViewIfNeeded();
   await expect(card.getByRole('group', { name: 'Speaking speed' })).toBeInViewport();
+});
+
+test('with push-to-talk on, the orb can be held to talk, as on a phone', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.addInitScript(() => localStorage.setItem('voicePtt', 'on'));
+  await page.route('**/voice/transcribe', route => route.fulfill({ json: { text: 'Hello from the orb.' } }));
+  // The detector starts a moment after the stage is up, and a press before that is not heard.
+  const ready = page.waitForEvent('console', m => m.text().includes('started micVAD'));
+  await start(page);
+  await ready;
+  const orb = page.locator('.voice-avatar');
+  await expect(orb).toHaveClass(/is-holdable/);
+  const box = (await orb.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // A tap is not a turn.
+  await page.mouse.down();
+  await expect(page.getByRole('status')).toContainText('Hearing you');
+  await page.mouse.up();
+  await page.waitForTimeout(600);
+  await expect(page.getByTestId('sent')).toHaveText('0');
+  // Held while speaking: sent when let go.
+  await page.mouse.down();
+  await expect(page.getByRole('status')).toContainText('Hearing you');
+  // A second finger lifting is not the first letting go.
+  await orb.dispatchEvent('pointerup', { pointerId: 7 });
+  await orb.dispatchEvent('pointercancel', { pointerId: 7 });
+  await page.waitForTimeout(400);
+  await expect(page.getByRole('status')).toContainText('Hearing you');
+  // Not a real click: the mouse is down on the orb.
+  await page.getByRole('button', { name: 'Inject speech' }).dispatchEvent('click');
+  await page.waitForTimeout(2800);
+  await page.mouse.up();
+  await expect(page.getByTestId('sent')).toHaveText('1', { timeout: 12000 });
+  await expect(page.getByTestId('last-send')).toHaveText(JSON.stringify({ message: 'Hello from the orb.', images: 0, steer: false }));
+});
+
+test('turning push-to-talk off during a hold does not leave the orb dead for the next hold', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.addInitScript(() => localStorage.setItem('voicePtt', 'on'));
+  const ready = page.waitForEvent('console', m => m.text().includes('started micVAD'));
+  await start(page);
+  await ready;
+  const orb = page.locator('.voice-avatar');
+  const status = page.getByRole('status');
+  const box = (await orb.boundingBox())!;
+  const x = box.x + box.width / 2, y = box.y + box.height / 2;
+  // The mouse has one pointer id for good: the first press after the switch has to count.
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await expect(status).toContainText('Hearing you');
+  await page.keyboard.press('h');
+  await expect(orb).not.toHaveClass(/is-holdable/);
+  await page.mouse.up();
+  await page.keyboard.press('h');
+  await expect(orb).toHaveClass(/is-holdable/);
+  await page.mouse.down();
+  await expect(status).toContainText('Hearing you');
+  await page.mouse.up();
+  await expect(status).not.toContainText('Hearing you');
+  // Every finger is a new pointer id, so a stale one would block all of them.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true });
+  const touch = async (type: 'touchStart' | 'touchEnd') => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
+  await touch('touchStart');
+  await expect(status).toContainText('Hearing you');
+  await page.keyboard.press('h');
+  await expect(orb).not.toHaveClass(/is-holdable/);
+  await touch('touchEnd');
+  await page.keyboard.press('h');
+  await expect(orb).toHaveClass(/is-holdable/);
+  for (let i = 0; i < 2; i++) {
+    await touch('touchStart');
+    await expect(status).toContainText('Hearing you');
+    await touch('touchEnd');
+    await expect(status).not.toContainText('Hearing you');
+  }
 });

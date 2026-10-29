@@ -1,17 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { latestBrowserActivity, latestTerminalActivity } from '../web/src/voice-browser.js';
-import { terminalRuns } from '../web/src/components/VoiceTerminal.js';
+import { latestCommand, terminalRuns } from '../extensions/terminal/src/runs.ts';
 
-test('only browser tool calls activate the browser; plain mentions and old text do not', () => {
+test('the terminal extension opens on a command, not on a mention of one or another tool', () => {
   const events = [
-    { seq: 1, type: 'message_update', payload: { text: 'browser' } },
+    { seq: 1, type: 'message_update', payload: { text: 'bash' } },
     { seq: 2, type: 'tool_execution_start', payload: { toolName: 'bash', input: { command: 'echo browser' } } },
     { seq: 3, type: 'tool_execution_start', payload: { toolName: 'mcp', input: { tool: 'browser_navigate' } } },
   ];
-  assert.equal(latestBrowserActivity(events.slice(0, 2)), 0);
-  assert.equal(latestBrowserActivity(events), 3);
-  assert.equal(latestTerminalActivity(events), 2);
+  assert.equal(latestCommand(events.slice(0, 1)), 0);
+  assert.equal(latestCommand(events), 2);
 });
 test('terminal follows cumulative streamed output and final tool errors by call id', () => {
   const events = [
@@ -36,22 +34,27 @@ test('a shell tool called through MCP is a run, and one its run left open is set
   assert.equal(terminalRuns(events.slice(0, 2), 6, 20000, true)[1].interrupted, true, 'ended with no event to say so');
 });
 
-test('files and pictures take the side first, and the middle when the side is taken', async () => {
-  const { placeWindows } = await import('../web/src/voice-windows.js');
-  const none = { browser: false, terminal: false, files: false, pictures: false };
+test('the pictures and a window that says nothing of its place take the side first, and the middle when the side is taken', async () => {
+  const { placeWindows } = await import('../core/web/src/voice-windows.js');
+  const none = { pictures: false };
+  // The terminal's window, an extension's that asks for the side; the browser's, one that asks for the middle; and
+  // Files', which does not say.
+  const terminal = 'x:pithagoras-terminal/terminal' as const, browser = 'x:pithagoras-browser/browser' as const;
+  const wants = { [terminal]: 'side' as const, [browser]: 'middle' as const };
+  const files = 'x:pithagoras-files/files' as const;
   assert.deepEqual(placeWindows({ ...none, pictures: true }), { main: undefined, side: 'pictures' });
-  assert.deepEqual(placeWindows({ ...none, files: true, terminal: true }), { main: 'files', side: 'terminal' });
-  assert.deepEqual(placeWindows({ ...none, pictures: true, browser: true }), { main: 'browser', side: 'pictures' });
-  assert.deepEqual(placeWindows({ ...none, pictures: true, files: true }), { main: 'pictures', side: 'files' });
-  assert.deepEqual(placeWindows({ ...none, browser: true, terminal: true }), { main: 'browser', side: 'terminal' });
+  assert.deepEqual(placeWindows({ ...none, [files]: true, [terminal]: true }, wants), { main: files, side: terminal });
+  assert.deepEqual(placeWindows({ ...none, pictures: true, [browser]: true }, wants), { main: browser, side: 'pictures' });
+  assert.deepEqual(placeWindows({ ...none, pictures: true, [files]: true }), { main: files, side: 'pictures' });
+  assert.deepEqual(placeWindows({ ...none, [browser]: true, [terminal]: true }, wants), { main: browser, side: terminal });
   // The conversation is a window like them, not something drawn over them.
   assert.deepEqual(placeWindows({ ...none, conversation: true }), { main: undefined, side: 'conversation' });
-  assert.deepEqual(placeWindows({ ...none, conversation: true, terminal: true }), { main: 'conversation', side: 'terminal' });
+  assert.deepEqual(placeWindows({ ...none, conversation: true, [terminal]: true }, wants), { main: 'conversation', side: terminal });
   assert.deepEqual(placeWindows({ ...none, conversation: true, pictures: true }), { main: 'pictures', side: 'conversation' });
 });
 
 test('the orb stands in the widest gap the windows leave, when it fits', async () => {
-  const { freeStrip } = await import('../web/src/voice-windows.ts');
+  const { freeStrip } = await import('../core/web/src/voice-windows.ts');
   const stage = { left: 100, right: 1100 };
   // Two windows with 400px between them: the orb goes in the middle of it.
   assert.deepEqual(freeStrip(stage, [{ left: 100, right: 400 }, { left: 800, right: 1100 }]), { center: 600, width: 400 });
@@ -64,25 +67,23 @@ test('the orb stands in the widest gap the windows leave, when it fits', async (
 });
 
 test('a window the orb comes back to its dock under is made to end above the dock', async () => {
-  const { clearOfDock, dockBox } = await import('../web/src/voice-windows.ts');
+  const { clearOfDock, dockBox } = await import('../core/web/src/voice-windows.ts');
   const size = { width: 520, height: 80, middle: 50, inset: 16 };
   const dock = dockBox({ left: 0, top: 0, right: 1000, bottom: 800 }, size);
   // 520px wide in the middle, its top 90px above the stage's bottom.
   assert.deepEqual(dock, { left: 240, right: 760, top: 710, bottom: 790 });
-  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 50, bottom: 790 }, 180, true, 0), { top: 50, height: 710 - 16 - 50 });
-  assert.equal(clearOfDock(dock, { left: 400, right: 980, top: 50, bottom: 700 }, 180, true, 0), null, 'ends above it already, if closer than the gap');
-  assert.equal(clearOfDock(dock, { left: 780, right: 980, top: 50, bottom: 790 }, 180, true, 0), null, 'beside the dock, not over it');
+  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 50, bottom: 790 }, 180, 0), { top: 50, height: 710 - 16 - 50 });
+  assert.equal(clearOfDock(dock, { left: 400, right: 980, top: 50, bottom: 700 }, 180, 0), null, 'ends above it already, if closer than the gap');
+  assert.equal(clearOfDock(dock, { left: 780, right: 980, top: 50, bottom: 790 }, 180, 0), null, 'beside the dock, not over it');
   // Too near the dock to be shortened enough: it moves up, as far as its area lets it.
-  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 610, bottom: 790 }, 180, true, 0), { top: 514, height: 180 });
-  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 610, bottom: 790 }, 180, true, 560), { top: 560, height: 180 });
-  // One that cannot move — the canvas, hanging from its corner — is only made as short as it may be.
-  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 610, bottom: 790 }, 260, false, 0), { top: 610, height: 260 });
+  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 610, bottom: 790 }, 180, 0), { top: 514, height: 180 });
+  assert.deepEqual(clearOfDock(dock, { left: 400, right: 980, top: 610, bottom: 790 }, 180, 560), { top: 560, height: 180 });
   // On a narrow stage the dock is the stage less its inset either side; on a phone it sits higher.
   assert.deepEqual(dockBox({ left: 0, top: 0, right: 400, bottom: 800 }, { ...size, middle: 94 }), { left: 16, right: 384, top: 666, bottom: 746 });
 });
 
 test('a window dragged by a corner stops at a window off that corner, by the edge that gives up less', async () => {
-  const { clear } = await import('../web/src/components/ResizeHandles.tsx');
+  const { clear } = await import('../core/web/src/components/ResizeHandles.tsx');
   const a = { left: 0, top: 0, right: 300, bottom: 300 };
   const b = { left: 400, top: 420, right: 700, bottom: 700 };
   const overlaps = (x: typeof a, y: typeof a) => x.left < y.right && x.right > y.left && x.top < y.bottom && x.bottom > y.top;

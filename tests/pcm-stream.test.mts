@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { preparePcmSpeech, readPcmStream } from '../web/src/pcm-stream.js';
-import { stretch } from '../web/src/time-stretch.js';
-import { addLocale, setLanguage } from '../web/src/i18n.js';
+import { preparePcmSpeech, readPcmStream } from '../core/web/src/pcm-stream.js';
+import { stretch } from '../core/web/src/time-stretch.js';
+import { addLocale, setLanguage } from '../core/web/src/i18n.js';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function audio() {
   const sources: any[] = [];
@@ -89,8 +89,8 @@ test('audio that stops short is reported without naming an engine, in the portal
       speech.completed.then(() => '', (e: Error) => e.message),
     ]);
   };
-  addLocale({ code: 'xx', name: 'Test', strings: { 'The voice service returned incomplete audio': 'xx: incomplete audio' } });
-  assert.deepEqual(await reasons(), ['The voice service returned incomplete audio', 'The voice service returned incomplete audio']);
+  addLocale({ code: 'xx', name: 'Test', strings: { "Voice mode's source returned incomplete audio": 'xx: incomplete audio' } });
+  assert.deepEqual(await reasons(), ["Voice mode's source returned incomplete audio", "Voice mode's source returned incomplete audio"]);
   setLanguage('xx');
   try {
     assert.deepEqual(await reasons(), ['xx: incomplete audio', 'xx: incomplete audio']);

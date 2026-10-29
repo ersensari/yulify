@@ -1,0 +1,48 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { freePort, runToEnd, serverEnv, startServer, testHome } from "./server-harness.mjs";
+
+// A portal started from source, as somebody who is not root: the folders it keeps for itself that nothing
+// names are inside its data directory. They used to be under a fixed /data, which only the image has,
+// and the server did not start without it.
+const home = testHome("yulify-data-folders-");
+rmSync(path.join(home, "agent-home"), { recursive: true });
+// What this process itself reads is another one, as the server is running in the first.
+const own = testHome("yulify-data-folders-own-");
+
+test("with only DATA_DIR given, the bin folder, the agent's home and the channels folder are made inside it", async () => {
+  const env = serverEnv(home, await freePort());
+  for (const name of ["BIN_DIR", "AGENT_HOME", "CHANNELS_DIR"]) delete env[name];
+  const { base } = await startServer(env);
+  assert.equal((await fetch(`${base}/api/auth/status`)).ok, true);
+  for (const name of ["bin", "agent-home", "channels"]) assert.ok(existsSync(path.join(home, name)), `${name} is in the data directory`);
+});
+
+test("the folders it names itself are where it says", async () => {
+  process.env.DATA_DIR = own;
+  process.env.AGENT_HOME = path.join(own, "elsewhere");
+  const { agentHomePath } = await import("../dist/agent-home.js");
+  assert.equal(agentHomePath(), path.join(own, "elsewhere"));
+  delete process.env.AGENT_HOME;
+  assert.equal(agentHomePath(), path.join(own, "agent-home"));
+  const { dataFolder } = await import("../dist/data-dir.js");
+  process.env.BIN_DIR = "/somewhere/else";
+  assert.equal(dataFolder("BIN_DIR", "bin"), "/somewhere/else");
+  delete process.env.BIN_DIR;
+  assert.equal(dataFolder("BIN_DIR", "bin"), path.join(own, "bin"));
+});
+
+test("with no DATA_DIR at all, a folder of the data directory is in ./data, not in /data", async () => {
+  const cwd = testHome("yulify-data-folders-cwd-");
+  const env = { ...process.env };
+  delete env.DATA_DIR;
+  delete env.BIN_DIR;
+  const module = fileURLToPath(new URL("../dist/data-dir.js", import.meta.url));
+  const { code, out, err } = await runToEnd(["--input-type=module", "-e", `const { dataFolder } = await import(${JSON.stringify(module)}); console.log(dataFolder("BIN_DIR", "bin"));`], env, { cwd });
+  assert.equal(code, 0, err);
+  // As the process has its folder: where a temporary one is behind a link, the folder the link leads to.
+  assert.equal(out.trim(), path.join(realpathSync(cwd), "data", "bin"));
+});

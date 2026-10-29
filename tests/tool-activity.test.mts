@@ -1,30 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { describeCall, describeOutcome, elapsed } from '../web/src/tool-activity.js';
+import { describeCall, describeOutcome, elapsed } from '../core/web/src/tool-activity.js';
 
 const folder = '/work/proj';
 const start = (toolName: string, args: any) => ({ toolName, args, toolCallId: 'c' });
 const end = (toolName: string, result: any, isError = false) => ({ toolName, toolCallId: 'c', result, isError });
 const said = (t: string, details?: any) => ({ content: [{ type: 'text', text: t }], ...(details ? { details } : {}) });
 
-test('file tools name the file, and open it in Files when it is in the folder', () => {
-  assert.deepEqual(describeCall(start('read', { path: 'src/app.ts', offset: 10, limit: 20 }), folder), { label: 'Reading app.ts', detail: 'src/app.ts · lines 10–29', target: 'files', path: 'src/app.ts' });
-  assert.deepEqual(describeCall(start('edit', { path: '/work/proj/README.md' }), folder), { label: 'Editing README.md', detail: '', target: 'files', path: 'README.md' });
+test('file tools name the file, by its path in the folder, and open no window of the portal\'s own', () => {
+  // The window a file's card opens is an extension's that says it is for files (Files', `opensFor`).
+  assert.deepEqual(describeCall(start('read', { path: 'src/app.ts', offset: 10, limit: 20 }), folder), { label: 'Reading app.ts', detail: 'src/app.ts · lines 10–29' });
+  assert.deepEqual(describeCall(start('edit', { path: '/work/proj/README.md' }), folder), { label: 'Editing README.md', detail: '' });
   assert.deepEqual(describeCall(start('write', { path: '/etc/hosts' }), folder), { label: 'Writing hosts', detail: '' });
 });
 
 test('other tools say what they are doing and where it can be seen', () => {
   assert.equal(describeCall(start('bash', { command: 'npm   test' }), folder).detail, 'npm test');
-  assert.equal(describeCall(start('bash', { command: 'x' }), folder).target, 'terminal');
+  // No window of the portal's own: the terminal extension's says it is for commands (`opensFor`).
+  assert.equal(describeCall(start('bash', { command: 'x' }), folder).target, undefined);
   assert.equal(describeCall(start('grep', { pattern: 'retry', glob: '*.ts' }), folder).label, 'Searching for “retry”');
-  assert.deepEqual(describeCall(start('browser_navigate', { url: 'https://example.com/a?b' }), folder), { label: 'Opening a page', detail: 'example.com', target: 'browser' });
-  assert.deepEqual(describeCall(start('mcp', { tool: 'browser_take_screenshot', args: {} }), folder), { label: 'Taking a screenshot', detail: '', target: 'browser' });
-  assert.deepEqual(describeCall(start('browser_scroll', {}), folder), { label: 'Scrolling the page', detail: '', target: 'browser' });
-  assert.deepEqual(describeCall(start('browser_find', { query: 'pricing' }), folder), { label: 'Searching the page', detail: 'pricing', target: 'browser' });
-  assert.deepEqual(describeCall(start('browser_get_text', { ref: 'e5' }), folder), { label: 'Reading the page', detail: '', target: 'browser' });
-  assert.deepEqual(describeCall(start('browser_key', { key: 'Enter' }), folder), { label: 'Typing in the browser', detail: '', target: 'browser' });
-  assert.deepEqual(describeCall(start('canvas_create', { title: 'Report' }), folder), { label: 'Starting a document', detail: 'Report', target: 'canvas' });
-  assert.deepEqual(describeCall(start('show_image', { path: 'a.png', title: 'Sales' }), folder), { label: 'Showing a picture', detail: 'Sales', target: 'pictures' });
+  // A browser tool's card is the browser's extension's to word (its window's `describe`), and opens its window: none of the portal's own.
+  assert.deepEqual(describeCall(start('browser_navigate', { url: 'https://example.com/a?b' }), folder), { label: 'Using browser navigate', detail: 'https://example.com/a?b' });
   assert.deepEqual(describeCall(start('jira_get_issue', { query: 'ABC-1' }), folder), { label: 'Using jira get issue', detail: 'ABC-1' });
 });
 

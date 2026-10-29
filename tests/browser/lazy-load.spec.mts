@@ -3,9 +3,8 @@ import { test, expect, mockPortal } from './portal-mock';
 
 /**
  * What the first draw has to fetch: the shell and the chat, not the other
- * pages, the shell's terminal emulator, or the dialogs that open over it. (The
- * dev server serves each module as a file of its own, so what was asked for
- * says what the entry reached.)
+ * pages or the dialogs that open over it. (The dev server serves each module
+ * as a file of its own, so what was asked for says what the entry reached.)
  */
 const at = new Date().toISOString();
 const chat = { id: 'a', title: 'Chat A', workspace: '/w/site', status: 'idle', kind: 'task', pinned: false, updated_at: at, created_at: at, provider: null, model: null, thinking_level: null };
@@ -17,7 +16,6 @@ async function portal(page: Page, more: (path: string) => unknown = () => undefi
     if (path === '/api/sessions') return { sessions: [chat], executor: 'host' };
     if (/^\/api\/sessions\/\w+$/.test(path)) return chat;
     if (path.endsWith('/config')) return { live: false, state: null, stats: null, thinking: { levels: [] }, models: { models: [] }, named: { provider: null, model: null } };
-    if (path.endsWith('/canvases')) return [];
     if (path === '/api/workspaces') return { root: '/w', workspaces: [] };
     if (path === '/api/models') return { models: [], providers: {} };
   });
@@ -26,13 +24,12 @@ async function portal(page: Page, more: (path: string) => unknown = () => undefi
   return files;
 }
 
-const PAGES = /\/components\/(SessionsPage|ProjectsPage|AgentPage|RoutinesPage|AuditPanel|BrowserPage|MemoryPage|ImagesPage|SetupAssistant|TerminalPanel)\.tsx$/;
-
-test('the first draw does not fetch the other pages or the terminal emulator, and a page is fetched when it is opened', async ({ page }) => {
+const PAGES = /\/components\/(SessionsPage|ProjectsPage|AgentPage|RoutinesPage|AuditPanel|SetupAssistant)\.tsx$/;
+test('the first draw does not fetch the other pages, and a page is fetched when it is opened', async ({ page }) => {
   const files = await portal(page);
   await page.goto('/s/a');
   await expect(page.getByRole('complementary', { name: 'Sidebar' }).getByText('Chat A')).toBeVisible();
-  expect(files.filter((f) => PAGES.test(f) || /@xterm/.test(f))).toEqual([]);
+  expect(files.filter((f) => PAGES.test(f))).toEqual([]);
 
   await page.getByRole('button', { name: 'Sessions', exact: true }).first().click();
   await expect(page).toHaveURL(/\/sessions$/);
@@ -56,19 +53,6 @@ test('a dialog whose file cannot be fetched is said so over the portal, which st
   await expect(dialog).toBeHidden();
   await expect(page).toHaveURL(/\/s\/a$/);
   await expect(page.getByRole('complementary', { name: 'Sidebar' }).getByText('Chat A')).toBeVisible();
-});
-
-test("a terminal whose file cannot be fetched is said so in its own tab, and the chat stays", async ({ page }) => {
-  await portal(page);
-  await page.route(/\/components\/TerminalPanel\.tsx/, (route) => route.fulfill({ status: 404, body: 'not found' }));
-  await page.goto('/s/a');
-  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
-  await page.getByRole('tab', { name: 'Your shell' }).click();
-  const note = page.getByRole('alert').filter({ hasText: 'could not be loaded' });
-  await expect(note).toBeVisible();
-  await expect(note.getByRole('button', { name: 'Reload the portal' })).toBeVisible();
-  // Not the whole chat taken with it: the message box is where it was.
-  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
 });
 
 test('a page whose file cannot be fetched offers a reload, and no new try that could only fail again', async ({ page }) => {

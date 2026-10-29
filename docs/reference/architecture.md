@@ -79,21 +79,18 @@ stray file would attach the wrong conversation.
 | `sessions` | Title, workspace, status, per-session model and effort, pinned, pi session file, and the channel or routine it belongs to |
 | `events` | Append-only log, one row per event, indexed by `(session_id, seq)` |
 | `message_versions` | The earlier versions of an edited message, and what followed them |
-| `canvases` | A session's canvases, with their revision |
 | `agents` | Each agent's name, home, avatar, voice and heartbeat schedule |
 | `activity` | The notes an agent's heartbeat left, and whether they have been read |
 | `channels` | Configured channels and their credentials, and the agent each talks as |
-| `routines` | Scheduled instructions: schedule or one-off time, where they run and report, the guard and browser switches |
+| `routines` | Scheduled instructions: schedule or one-off time, where they run and report, the guard switch and their own tool switches |
 | `people` | Who the agent has met, and their role |
 | `questions`, `grants` | A colleague's requests for approval, and the single-use permissions approving one gives |
 | `notes` | What a person told the agent about a conversation, until it is delivered |
 | `tool_rules` | The standing permissions of [Allowed anyway](/people/rules) |
 | `audit` | The guard's decisions, trimmed to the latest 2,000 |
-| `settings` | Portal-wide overrides, and the small things the portal remembers (the tools it has seen, the browser switch, the model's context windows) |
+| `settings` | Portal-wide overrides, and the small things the portal remembers (the tools it has seen, the model's context windows) |
 | `project_tools` | A project's tool switches |
 | `open_subagents` | The subagents still running in a session |
-| `images` | The pictures of the [Images page](/guide/images), and what each was made from |
-| `voice_presets` | The saved voices |
 | `signed_out` | Logins that were ended early, until they would have expired anyway |
 
 Changes to the schema are made in place — `ALTER TABLE` rather than recreating
@@ -105,20 +102,25 @@ transaction, showing an Upgrading page meanwhile. See
 
 ## Beside the run
 
-Not everything goes through pi. The agent's own browser tools (`browser/tools.ts`)
-drive the Chromium over its debugging port from inside the portal, not as an MCP
-server, and the image tools (`generate_image`, `edit_image`, `show_image`) are
-registered by the portal the same way. The Files, Git and terminal panels talk to the
-session's folder directly (`server/src/workspace-files.ts`, `git.ts`, a pty per
-terminal). Managed add-ons — Browser, Voice, Understory — are Docker containers
-the portal starts through the socket; voice shares the portal's network
-namespace so its services need no published ports. Opt-in pi extensions the
+Not everything goes through pi. An extension's server half registers its tools
+in the portal's process, not as an MCP server: [Media](/guide/media)'s picture
+tools (`generate_image`, `edit_image`, `show_image`) and video tools
+(`generate_video`, `show_video`), and the [Browser](/guide/browser) extension's
+tools, which drive a Chromium over its debugging port.
+Files, Git and the terminal are extensions too, whose server halves work in the
+session's folder through what the portal gives every extension
+([Building an extension](/guide/extension-ui)): `portal.files`
+(`core/server/src/workspace-files.ts`) and `portal.git` (`git.ts`); the
+terminal runs a pty for each terminal itself. The containers of Browser, of the voice service (Voice) and of
+Understory, the agent's memory, are run through the
+[Docker](/guide/docker) extension, which every extension that runs containers builds on; the voice and Understory containers share the
+portal's network namespace so their services need no published ports. Opt-in pi extensions the
 portal ships (`extensions/`, the subagent tool) are installed as local pi
 packages only when switched on. The server holds one socket in its data
 directory so only one portal runs on it.
 
 Two things run on a clock of their own. The routine supervisor
-(`server/src/routines/`) starts a run of a routine when its schedule says so,
+(`core/server/src/routines/`) starts a run of a routine when its schedule says so,
 and the heartbeat (`heartbeat.ts`) lets an agent look around in a session of its
 own, as the read-only role `heartbeat`, when it is its turn: a look never starts
 while a chat or a routine is working.
@@ -130,11 +132,11 @@ sessions list, the agents page, each settings tab — so deep links and the back
 button work, with an SPA fallback on the server. The first draw needs only the
 shell, the chat and the sign-in page: the other pages, Settings, the setup
 assistant, the terminal emulator and the text of the language in use are
-fetched when first needed (`lazyComponent` in `web/src/lazy.ts`).
+fetched when first needed (`lazyComponent` in `core/web/src/lazy.ts`).
 
 State is polled every five seconds and pushed over SSE for the open session.
 Text is translated in the browser: every English string goes through `t()`, and a
-language is one file in `web/src/locales/`. See [Settings → Language](/guide/settings#language).
+language is one file in `core/web/src/locales/`. See [Settings → Language](/guide/settings#language).
 
 ## Channel loading
 

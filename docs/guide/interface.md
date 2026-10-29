@@ -29,11 +29,28 @@ itself, with a **Try again** button for impatience. It does not fall back to the
 password form: your login is still good, and only a portal that says you are not
 signed in shows that.
 
+## The sidebar and extensions' pages
+
+The pages that installed extensions bring are not among the portal's own in the
+sidebar: they are together under **Extensions**, above **Audit**, which stays
+the last destination. The group folds like a folder and is remembered in this
+browser. It is open until you fold it, and stays open while one of its pages is
+showing. Folded to the rail of icons, the sidebar has one puzzle button instead,
+before the one for Audit, which opens a menu of those pages: the arrow keys
+move, Enter picks one, Esc closes the menu. With no extension page there is no
+group and no button. [Media](/guide/media) is one of them, listed while an
+image or a video endpoint is set up.
+
 ## Theme
 
 **Settings → This browser → Theme** is light, dark or **System**, the default,
 which follows the machine and changes with it — at sunset, on a desktop that
 flips.
+
+An installed extension can bring a theme: other colours in place of the
+portal's own, for light, for dark or for both. Where one is installed,
+**Colours** under the three appears, with the portal's own and each theme to
+choose from. See [Themes](/guide/extension-ui#themes).
 
 In both themes even the quietest text — hints, timestamps, placeholders — keeps a
 contrast of at least 4.5:1 against what it is drawn on, and the keyboard focus is
@@ -66,7 +83,8 @@ default**:
   a drop-down list does the same.
 - **Settings.** The side navigation comes in line by line, the page you pick
   slides in, and a switch's knob bounces.
-- **The Browser page.** Its screen switches on like an old tube.
+- **The browser.** Its screen switches on like an old tube, on the Browser page,
+  beside a chat and in voice mode. See [The agent's browser](/guide/browser).
 - **Voice mode.** The orb comes up out of a swell of light, and the windows that
   open on its stage overshoot into place.
 - **Pictures being made.** While the agent has a picture made or changed, a soft
@@ -110,10 +128,10 @@ not made safer by the laptop having turned the question off.
 Closing a dialog with something typed in that is not saved yet — a skill you
 rewrote, a provider (its key, its models and their windows), project, MCP server
 or channel you are setting up, a person's notes, a project's instructions, a
-pasted config, pi's `settings.json` under Advanced, an extension's setting, an
-add-on's form (voice, a voice you are adding, image generation, memory), the
-avatar — asks **Discard your changes?** first, whether you press Esc, click
-beside the dialog or use its close button. That question is always asked:
+pasted config, pi's `settings.json` under Advanced, an extension's setting (the
+voice service's voice settings, a voice you are adding there, image generation,
+memory), the avatar — asks **Discard your changes?** first, whether you press
+Esc, click beside the dialog or use its close button. That question is always asked:
 nothing else holds a copy of a draft. A field that says it is saved when you
 leave it, such as the default context window, is saved by every one of those
 ways out, Esc included. A dialog's own **Cancel** button is an answer already,
@@ -133,14 +151,18 @@ in two places:
   switched off there is not offered to the model at all; the extension stays
   installed and its slash commands keep working. Tools are listed once a
   conversation has run, because that is when pi builds the list of what its
-  extensions registered. The portal's own `generate_image` and `edit_image` are the exception:
-  they are listed as soon as image generation or editing is switched on. A group
-  can be switched off as a whole, and each package can be given a name of your own — *Rename* — for the list. The
-  portal's picture tools (`show_image`, `generate_image` and `edit_image`) share
-  one group, **Images**, in every tool list; an extension's tool of one of those
-  names stays in the group of its extension.
+  extensions registered. The tools an extension's server half [offers](/guide/extension-ui#tools-that-follow-the-settings)
+  are the exception: [Media](/guide/media)'s `generate_image` and `edit_image` are listed as soon as
+  image generation or editing is switched on, and its video tools as soon as video generation is. A group
+  can be switched off as a whole, and each package can be given a name of your own — *Rename* — for the list.
+  Media's picture and video tools (`show_image`, `generate_image`, `edit_image`, `generate_video` and
+  `show_video`) are one group in every tool list, its package's, `pithagoras-media`, as any extension's
+  tools are in the group of its package.
 - **Projects → Tools** on a project's row sets what every chat in that project starts
   with, against the portal-wide default; see [Projects](/guide/projects#tools).
+- **Tools** on an agent's page sets what every chat in its home and every run it does on
+  its own starts with ([Agents](/guide/agents#tools)), and **Tools** on a routine's page
+  what every run of it starts with ([Routines](/guide/routines#tools)).
 - The **tools** control of a chat switches them for that chat only, from its
   next message. It is there before the first message too, so a tool can be
   kept away from a chat from the start.
@@ -151,7 +173,11 @@ could not be read and offers **Try again**, and a switch the portal did not save
 snaps back with the reason beside it.
 
 Both are safety tools as much as convenience: a browser or shell tool that a
-chat has no business with is simply not there to be talked into.
+chat has no business with is simply not there to be talked into. An MCP server is a
+group like any other, switched whole or tool by tool; a tool switched off is not
+reachable through the adapter's `mcp` tool either, and one the MCP configuration
+leaves out is not listed at all; see
+[MCP servers](/guide/mcp#what-the-tool-lists-show).
 
 ## One server per data directory
 

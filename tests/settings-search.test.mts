@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SETTINGS_INDEX, fold, searchSettings } from "../web/src/settings-search.ts";
-import { ago, compactCount, packageName } from "../web/src/package-names.ts";
-import { forget, load, peek } from "../web/src/settings-cache.ts";
+import { SETTINGS_INDEX, fold, searchSettings } from "../core/web/src/settings-search.ts";
+import { ago, compactCount, packageName } from "../core/web/src/package-names.ts";
+import { forget, load, peek } from "../core/web/src/settings-cache.ts";
 
 test("a setting is found by its title first, then by what it is about", () => {
   const titles = (q: string) => searchSettings(q, SETTINGS_INDEX).map((e) => e.title);
@@ -15,11 +15,22 @@ test("a setting is found by its title first, then by what it is about", () => {
   assert.deepEqual(titles("nothing like this"), []);
 });
 
-test("the picture tools are found in Tools, the image endpoint on the Images page", () => {
-  for (const q of ["show_image", "generate_image", "edit_image"]) assert.ok(searchSettings(q, SETTINGS_INDEX).some((e) => e.tab === "tools"), `${q} leads to Tools`);
-  for (const q of ["image generation", "image editing", "bildgenerierung"]) {
-    const found = searchSettings(q, SETTINGS_INDEX);
-    assert.ok(found.length && found.every((e) => e.tab === "images"), `${q} leads to Images`);
+test("changing the password is found on its own page, by the English word and the German", () => {
+  for (const q of ["password", "passwort", "kennwort", "change password"]) {
+    assert.ok(searchSettings(q, SETTINGS_INDEX).some((e) => e.tab === "authentication" && e.title === "Change password"), `${q} leads to Authentication`);
+  }
+});
+
+test("single sign-on is found on its own page, by what people call it", () => {
+  for (const q of ["sso", "oidc", "openid connect", "keycloak", "single sign-on", "einmalanmeldung"]) {
+    assert.ok(searchSettings(q, SETTINGS_INDEX).some((e) => e.tab === "authentication"), `${q} leads to Single sign-on`);
+  }
+  assert.ok(searchSettings("oidc only", SETTINGS_INDEX).some((e) => e.tab === "authentication" && e.title === "OIDC only"));
+});
+
+test("the sites the agent's tools may reach are found in Settings → Guard, by what people call the list", () => {
+  for (const q of ["allowlist", "browser allowlist", "domains", "sites", "playwright", "erlaubte domänen"]) {
+    assert.ok(searchSettings(q, SETTINGS_INDEX).some((e) => e.tab === "guard" && e.section === "Sites the agent's tools may reach"), `${q} leads to the guard's list`);
   }
 });
 

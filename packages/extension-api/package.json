@@ -1,0 +1,67 @@
+{
+  "name": "@pithagoras/extension-api",
+  "version": "0.2.0",
+  "description": "What a Pithagoras extension is given, as types, and the build that bundles one written in TypeScript and JSX",
+  "keywords": ["pithagoras", "pi", "extension", "types", "esbuild", "tailwindcss"],
+  "homepage": "https://thecodacus.github.io/pithagoras/guide/extension-ui",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thecodacus/pithagoras.git",
+    "directory": "packages/extension-api"
+  },
+  "bugs": {
+    "url": "https://github.com/thecodacus/pithagoras/issues"
+  },
+  "type": "module",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    },
+    "./server": {
+      "types": "./server.d.ts"
+    },
+    "./build": "./build.mjs",
+    "./tailwind": "./tailwind.mjs"
+  },
+  "files": [
+    "index.d.ts",
+    "server.d.ts",
+    "build.mjs",
+    "tailwind.mjs",
+    "README.md",
+    "NOTICE"
+  ],
+  "peerDependencies": {
+    "@types/express": "^5",
+    "@types/node": ">=22",
+    "@types/react": "^18.3",
+    "esbuild": ">=0.20",
+    "tailwindcss": "^3.4",
+    "postcss": "^8"
+  },
+  "peerDependenciesMeta": {
+    "@types/express": {
+      "optional": true
+    },
+    "@types/node": {
+      "optional": true
+    },
+    "@types/react": {
+      "optional": true
+    },
+    "esbuild": {
+      "optional": true
+    },
+    "tailwindcss": {
+      "optional": true
+    },
+    "postcss": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0"
+}
