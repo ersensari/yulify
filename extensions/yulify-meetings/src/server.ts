@@ -74,7 +74,19 @@ export default function meetings(portal: ServerPortal) {
       let index:any={parts:[]}; try { index=JSON.parse(found.read(`${prefix}/index.json`)); } catch { /* Older records may have no saved audio. */ }
       const parts=Array.isArray(index.parts) ? index.parts.filter((p:any) => Number.isInteger(p.index) && p.index>=0).map((p:any)=>({index:p.index,start:p.start,end:p.end,summaryStatus:p.summary_status,hasAudio:typeof p.file==='string',hasTranscript:typeof p.transcript==='string',hasSummary:typeof p.summary==='string'})) : [];
       let transcript=''; try { transcript=found.read(`.meeting-notes/${id}.txt`); } catch { /* recording may still be starting */ }
-      res.json({id,chatId:chat,name:name(chat,id),startedAt:found.state.startedAt,recording:!!found.state.recording,transcript,parts});
+      // Only a completed, explicitly attributed summary is shown. Old chat
+      // history, a partial status, and an unmarked .summary.md are not evidence.
+      let fullSummary:string|undefined, fullSummaryStatus:string|undefined;
+      try {
+        const status=JSON.parse(found.read(`.meeting-notes/${id}.summary-status.json`));
+        if(status.version===1 && status.meeting===`${id}.txt` && typeof status.requestId==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(status.requestId)) {
+          if(status.state==='completed' && status.file===`${id}.summary.md`) {
+            fullSummary=found.read(`.meeting-notes/${id}.summary.md`);
+            fullSummaryStatus='completed';
+          } else if(['started','failed','unavailable'].includes(status.state)) fullSummaryStatus=status.state;
+        }
+      } catch { /* A missing or unreadable summary is not attributed. */ }
+      res.json({id,chatId:chat,name:name(chat,id),startedAt:found.state.startedAt,recording:!!found.state.recording,transcript,parts,fullSummary,fullSummaryStatus});
     } catch { res.status(404).json({error:'Meeting not found'}); }
   });
   portal.router.get('/meetings/:chat/:id/parts/:number/:kind', (req,res) => {

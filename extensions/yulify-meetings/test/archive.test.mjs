@@ -34,6 +34,21 @@ test('task, non-task and orphan archives in a permitted folder are readable with
     let res=await fetch(base,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Review'})}); assert.equal(res.status,200);
     const detail=await (await fetch(base)).json(); assert.equal(detail.name,'Review'); assert.equal(detail.transcript,'transcript fixture');
     assert.equal(await (await fetch(base+'/parts/0/summary')).text(),'summary fixture');
+    const summary=path.join(dir,'meeting-orphan.summary.md'), status=path.join(dir,'meeting-orphan.summary-status.json');
+    const provenance={version:1,meeting:'meeting-orphan.txt',requestId:'721c8c0c-602e-4ec2-800d-688a74474543',state:'completed',file:'meeting-orphan.summary.md'};
+    fs.writeFileSync(summary,'new full summary');
+    const readDetail=async()=>await (await fetch(base)).json();
+    assert.equal((await readDetail()).fullSummary,undefined); // unmarked old files are not attributed
+    fs.writeFileSync(status,JSON.stringify({...provenance,meeting:'meeting-task.txt'}));
+    assert.equal((await readDetail()).fullSummary,undefined);
+    fs.writeFileSync(status,JSON.stringify({...provenance,file:'meeting-task.summary.md'}));
+    assert.equal((await readDetail()).fullSummary,undefined);
+    fs.writeFileSync(status,JSON.stringify({...provenance,requestId:'invalid'}));
+    assert.equal((await readDetail()).fullSummary,undefined);
+    fs.writeFileSync(status,JSON.stringify({...provenance,state:'started'}));
+    assert.equal((await readDetail()).fullSummary,undefined);
+    fs.writeFileSync(status,JSON.stringify(provenance));
+    assert.equal((await readDetail()).fullSummary,'new full summary');
     assert.equal(fs.readFileSync(path.join(dir,'meeting-orphan.state.json'),'utf8'),before);
     assert.equal((await fetch(origin+'/meetings/invalid/meeting-task')).status,404);
   } finally { await new Promise(resolve=>server.close(resolve)); fs.rmSync(root,{recursive:true,force:true}); }

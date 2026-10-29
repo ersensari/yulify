@@ -88,7 +88,18 @@ function meetings(portal) {
         transcript = found.read(`.meeting-notes/${id}.txt`);
       } catch {
       }
-      res.json({ id, chatId: chat, name: name(chat, id), startedAt: found.state.startedAt, recording: !!found.state.recording, transcript, parts });
+      let fullSummary, fullSummaryStatus;
+      try {
+        const status = JSON.parse(found.read(`.meeting-notes/${id}.summary-status.json`));
+        if (status.version === 1 && status.meeting === `${id}.txt` && typeof status.requestId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(status.requestId)) {
+          if (status.state === "completed" && status.file === `${id}.summary.md`) {
+            fullSummary = found.read(`.meeting-notes/${id}.summary.md`);
+            fullSummaryStatus = "completed";
+          } else if (["started", "failed", "unavailable"].includes(status.state)) fullSummaryStatus = status.state;
+        }
+      } catch {
+      }
+      res.json({ id, chatId: chat, name: name(chat, id), startedAt: found.state.startedAt, recording: !!found.state.recording, transcript, parts, fullSummary, fullSummaryStatus });
     } catch {
       res.status(404).json({ error: "Meeting not found" });
     }

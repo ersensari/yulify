@@ -17,12 +17,12 @@ With sandboxing enabled `likeParent` requires an accessible associated chat, so
 an orphan folder with none may be refused. A list is capped at 2,000 entries and
 reports truncation. An audio part appears once the recorder has built it.
 
-The full-meeting summary is a prompt placed in chat history, not an identifiable
-archive file; queued prompts, intervening conversation, and deleted sessions
+In existing recordings the full-meeting summary is a prompt placed in chat
+history, not an identifiable archive file; queued prompts, intervening conversation, and deleted sessions
 make attributing an assistant event to it unreliable. Part summaries are stored
-files and are available here. A later recording integration should generate and
-atomically save a dedicated summary with explicit status and meeting identity,
-without rewriting or guessing at existing conversations.
+files and are available here. Newly captured summaries may be shown when their status is completed and its
+meeting, request identity and filename match. Existing conversations are never
+guessed or rewritten.
 
 Build with `node extensions/yulify-meetings/build.mjs` in a v0.2 checkout after
 installing its workspace dependencies. Installing/enabling the extension and
