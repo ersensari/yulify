@@ -22,6 +22,7 @@ export class MiniCpmDuplexRoom {
   private disposed = false;
   private stopMeter?: () => void;
   private meterContext?: AudioContext;
+  private outputMeters = new Map<RemoteTrack, () => void>();
   private microphoneEnabled = true;
   private outputGain = 1;
   private recovery?: Promise<void>;
@@ -55,6 +56,7 @@ export class MiniCpmDuplexRoom {
       element.volume = this.outputGain;
       element.setAttribute("playsinline", "true");
       this.audioElements.add(element);
+      this.startOutputMeter(track);
       void element.play().catch(() => this.hooks.state?.("error", "Allow audio playback in the browser, then reconnect."));
     });
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => this.detach(track));
@@ -302,6 +304,9 @@ export class MiniCpmDuplexRoom {
     this.microphoneStream?.getTracks().forEach(track => track.stop()); this.microphoneStream = undefined;
     await this.stopAcoustics();
     this.stopMeter?.(); this.stopMeter = undefined;
+    for (const stop of this.outputMeters.values()) stop();
+    this.outputMeters.clear();
+    this.hooks.event?.({type:'voice.output.level',level:0});
     void this.meterContext?.close(); this.meterContext = undefined;
     for (const element of this.audioElements) {
       try { element.pause(); element.srcObject = null; } catch { /* already detached */ }
@@ -317,9 +322,28 @@ export class MiniCpmDuplexRoom {
   }
 
   private detach(track: RemoteTrack) {
+    this.outputMeters.get(track)?.();
+    this.outputMeters.delete(track);
+    this.hooks.event?.({type:'voice.output.level',level:0});
     for (const element of track.detach()) {
       this.audioElements.delete(element);
       try { element.pause(); element.srcObject = null; } catch { /* already detached */ }
     }
+  }
+
+  private startOutputMeter(track: RemoteTrack) {
+    const context=this.meterContext;
+    if(!context || !track.mediaStreamTrack)return;
+    try {
+      const source=context.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+      const analyser=context.createAnalyser();analyser.fftSize=256;source.connect(analyser);
+      const samples=new Float32Array(analyser.fftSize);
+      const timer=window.setInterval(()=>{
+        analyser.getFloatTimeDomainData(samples);
+        const rms=Math.sqrt(samples.reduce((sum,value)=>sum+value*value,0)/samples.length);
+        this.hooks.event?.({type:'voice.output.level',level:Math.min(1,rms*5*this.outputGain)});
+      },100);
+      this.outputMeters.set(track,()=>{window.clearInterval(timer);source.disconnect();analyser.disconnect();});
+    } catch { this.hooks.event?.({type:'voice.output.level',level:0}); }
   }
 }

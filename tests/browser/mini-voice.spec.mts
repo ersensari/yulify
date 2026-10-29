@@ -66,3 +66,13 @@ test('experimental acoustics status follows both voice layouts without breaking 
  await expect(page.locator('.mini-voice-bar').getByText('Acoustic analysis unavailable',{exact:true})).toBeVisible();
  await expect(page.locator('.mini-voice-bar')).toBeVisible();
 });
+
+test('mini view draws independent microphone and speech levels',async({page})=>{
+ await page.addInitScript(()=>localStorage.setItem('yulify.voiceLayout','mini'));
+ await page.goto('/tests/voice.html');await page.getByRole('button',{name:'Start voice mode',exact:true}).click();
+ const canvas=page.locator('.mini-voice-waves canvas');await expect(canvas).toBeVisible();
+ const pixels=()=>canvas.evaluate((c:HTMLCanvasElement)=>{const d=c.getContext('2d')!.getImageData(0,0,c.width,c.height).data;let upper=0,lower=0;for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3]){if(y<14)upper++;else lower++;}return {upper,lower};});
+ const before=await pixels();
+ await page.evaluate(()=>{(window as any).voiceAcoustics({type:'microphone.capture',level:.8,enabled:true,muted:false});(window as any).voiceAcoustics({type:'voice.output.level',level:.9});});
+ await expect.poll(async()=>{const p=await pixels();return p.upper>before.upper&&p.lower>before.lower;}).toBe(true);
+});

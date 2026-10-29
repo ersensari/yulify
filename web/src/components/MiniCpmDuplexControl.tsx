@@ -8,7 +8,7 @@ import { t } from "../i18n";
 import { session } from "../safe-storage";
 
 /** Transport lifecycle for the standard voice control. May render headlessly. */
-export function MiniCpmDuplexControl({ sessionId, headless = false, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onLiveTranscript, onAcoustics, onError }: { sessionId: string; headless?: boolean; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onLiveTranscript?: (value: LiveVoiceTranscript | undefined) => void; onAcoustics?: (status:string)=>void; onError?: (message: string) => void }) {
+export function MiniCpmDuplexControl({ sessionId, headless = false, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onOutputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onLiveTranscript, onAcoustics, onError }: { sessionId: string; headless?: boolean; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onOutputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onLiveTranscript?: (value: LiveVoiceTranscript | undefined) => void; onAcoustics?: (status:string)=>void; onError?: (message: string) => void }) {
   const liveTranscript = useRef<LiveVoiceTranscript>();
   const room = useRef<MiniCpmDuplexRoom>();
   const attemptId = useRef(0);
@@ -33,7 +33,7 @@ export function MiniCpmDuplexControl({ sessionId, headless = false, disabled = f
     onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
     const current = room.current; room.current = undefined;
     await current?.close();
-    setState("closed"); onInputLevel?.(0); onActivity?.("listening");
+    setState("closed"); onInputLevel?.(0); onOutputLevel?.(0); onActivity?.("listening");
   };
 
   const start = () => {
@@ -53,6 +53,7 @@ export function MiniCpmDuplexControl({ sessionId, headless = false, disabled = f
               onLiveTranscript?.(liveTranscript.current);
             }
             if (event.type === "voice.activity" && typeof event.activity === "string") onActivity?.(event.activity);
+            if (event.type === "voice.output.level" && typeof event.level === "number") onOutputLevel?.(event.level);
             if (event.type === "voice.speaker") {
               if (event.verification_enabled === false) setToolActivity("Transcribing audio · speaker verification off");
               else if (event.matched === true) setToolActivity("Transcribing audio…");

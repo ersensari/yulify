@@ -156,6 +156,7 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
   const duplexToggleRef = useRef<(() => void) | null>(null);
   const [duplexActivity, setDuplexActivity] = useState("listening");
   const [duplexState, setDuplexState] = useState("closed");
+  const levels = useRef<VoiceLevels>({ input: 0, output: 0 });
   const duplexActiveRef = useRef(false);
   const duplexMuteRef = useRef<(() => void) | null>(null);
   useEffect(() => onDesktopAction(action => {
@@ -166,7 +167,8 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
     if (action === 'mute-voice') duplexMuteRef.current?.();
   }),[sessionId]);
   useEffect(() => {
-    desktopState({active:duplexActive,activity:duplexState==='connected'?duplexActivity:duplexState,caption:duplexActivity==='speaking'?(duplexCaption||liveTranscript?.text):(liveTranscript?.text||duplexCaption),muted:duplexMuted});
+    const send=()=>desktopState({active:duplexActive,activity:duplexState==='connected'?duplexActivity:duplexState,caption:duplexActivity==='speaking'?(duplexCaption||liveTranscript?.text):(liveTranscript?.text||duplexCaption),muted:duplexMuted,input:duplexMuted?0:levels.current.input,output:levels.current.output});
+    send();if(!duplexActive)return;const timer=window.setInterval(send,100);return()=>window.clearInterval(timer);
   },[duplexActive,duplexState,duplexActivity,duplexCaption,duplexMuted,liveTranscript]);
   useEffect(() => () => desktopState({active:false,activity:'listening'}),[]);
   const [musicPlaying, setMusicPlaying] = useState(false);
@@ -175,7 +177,6 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
   const mutedRef = useRef(false);
   const muteBusy = useRef(false);
   const startButton = useRef<HTMLButtonElement>(null);
-  const levels = useRef<VoiceLevels>({ input: 0, output: 0 });
   const compactionEvent = useMemo(() => {
     for (let i = toolEvents.length - 1; i >= 0; i--) if (toolEvents[i].type === 'compaction_start' || toolEvents[i].type === 'compaction_end') return toolEvents[i];
   }, [toolEvents]);
@@ -929,7 +930,7 @@ export function VoiceControl({ canvasOpen, onCanvasMinimize, onCanvasToggle, ses
       <button type="button" className="prompt-action" aria-label={t("Profile voice latency")} title={t("Profile voice latency")} aria-pressed={profileOpen} onClick={()=>{setProfileOpen(v=>!v);if(profileOpen)profiler.current!.close('disabled');}}><LuGauge/></button>
       <MiniCpmDuplexControl headless onAcoustics={setDuplexAcoustics} onLiveTranscript={setLiveTranscript} onToggleControl={control => { duplexToggleRef.current = control;
         if(control && window.sessionStorage.getItem('yulify:desktop-start-voice')===sessionId){window.sessionStorage.removeItem('yulify:desktop-start-voice');control();}
-      }} onActivity={setDuplexActivity} sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); setLiveTranscript(undefined); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; setDuplexHearing(value > 0.04); }} onError={setDuplexError} />
+      }} onActivity={setDuplexActivity} sessionId={sessionId} disabled={enabled || starting} onModeChange={active => { duplexActiveRef.current = active; setDuplexActive(active); if (!active) { setDuplexMuted(false); setDuplexCaption(""); setLiveTranscript(undefined); } }} onStatus={(next, caption) => { setDuplexState(next); setDuplexCaption(caption); }} onMuteControl={control => { duplexMuteRef.current = control; if (!control) setDuplexMuted(false); }} onMutedChange={setDuplexMuted} onInputLevel={value => { levels.current.input = value; setDuplexHearing(value > 0.04); }} onOutputLevel={value => { levels.current.output = value; }} onError={setDuplexError} />
       {error && !enabled && !starting && <VoiceErrorNotice message={error} onClose={() => setError("")} />}
       <button ref={startButton} type="button" className="prompt-action" disabled={enabled || starting}
         onClick={() => duplexToggleRef.current?.()} aria-label={duplexActive ? t("End voice mode") : t("Start voice mode")}
