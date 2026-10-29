@@ -1,3 +1,4 @@
+import { holdDesktopCapture } from "./desktop";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MicVAD } from "@ricky0123/vad-web";
 import { api, DEFAULT_VAD } from "./api";
@@ -146,6 +147,7 @@ export function useDictation({
     r.vad = undefined;
     void detector?.destroy().catch(() => {});
     r.mic?.getTracks().forEach((track) => track.stop());
+    void holdDesktopCapture("dictation:"+r.sessionId,false);
     r.mic = undefined;
     const audio = r.audio;
     r.audio = undefined;
@@ -187,6 +189,7 @@ export function useDictation({
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
         throw new Error(t("Microphone access requires HTTPS or localhost."));
+      await holdDesktopCapture("dictation:"+r.sessionId,true);
       const mic = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });

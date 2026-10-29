@@ -1,3 +1,7 @@
+import type { TranscriptionSnapshot } from "../../server/src/shared-asr";
+export type { TranscriptionSnapshot, SpeakerTurn } from "../../server/src/shared-asr";
+import type { AsrSettings, AsrSettingsResponse } from "../../server/src/asr-settings";
+export type { AsrSettings, AsrSettingsResponse } from "../../server/src/asr-settings";
 import { t } from "./i18n";
 import { samplesWav } from "./voice";
 import type { RtcSpeaker } from "./rtc-stt";
@@ -470,17 +474,21 @@ export const api = {
       return null;
     }
   },
-  startMeeting: (sessionId: string) => json<{ ok: boolean }>(`/api/sessions/${sessionId}/meeting/start`, { method: "POST" }),
-  /** Fire-and-forget from the recorder's point of view, but awaited by the caller so chunks never overlap in flight and land on disk out of order. */
-  sendMeetingChunk: async (sessionId: string, samples: Float32Array, signal?: AbortSignal): Promise<void> => {
-    const res = await send(`/api/sessions/${sessionId}/meeting/chunk`, { method: "POST", headers: { "Content-Type": "audio/wav" }, body: samplesWav(samples), signal });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new ApiError(body.error || t("Could not save meeting audio"), res.status, body);
-    }
+  startMeeting: (sessionId: string) => json<TranscriptionSnapshot & {transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/start`, { method: "POST" }),
+  meetingStatus: (sessionId: string) => json<TranscriptionSnapshot & {transcriptPath?:string}>(`/api/sessions/${sessionId}/meeting`),
+  sendMeetingChunk: async (sessionId: string, samples: Float32Array, sequence: number): Promise<TranscriptionSnapshot> => {
+    const res = await send(`/api/sessions/${sessionId}/meeting/chunk`, { method: "POST", headers: { "Content-Type": "audio/wav", "X-Audio-Sequence": String(sequence) }, body: samplesWav(samples), signal:AbortSignal.timeout(30_000) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(body.error || "Could not save meeting audio", res.status, body);
+    return body as TranscriptionSnapshot;
   },
-  stopMeeting: (sessionId: string) => json<{ ok: boolean; transcriptPath?: string }>(`/api/sessions/${sessionId}/meeting/stop`, { method: "POST" }),
+  stopMeeting: (sessionId: string, summarize = true, incomplete = false) => json<TranscriptionSnapshot & {ok:boolean;transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/stop`, { method: "POST",body:JSON.stringify({summarize,incomplete}) }),
+  speakerExamples: (offset=0) => json<{examples:SpeakerExample[];next_offset?:number|null;retention_days:number}>(`/api/voice/speaker-examples?offset=${offset}`),
+  assignSpeakerExample: (id:string,person:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"PUT",body:JSON.stringify({person})}),
+  deleteSpeakerExample: (id:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"DELETE"}),
   setVoiceGpu: (gpu: string) => json<{ selected: string; restarting: boolean }>('/api/voice/gpu', { method: 'PUT', body: JSON.stringify({ gpu }) }),
+  asrSettings: () => json<AsrSettingsResponse>("/api/voice/asr-settings"),
+  setAsrSettings: (value: AsrSettings) => json<AsrSettingsResponse>("/api/voice/asr-settings", {method:"PUT",body:JSON.stringify(value)}),
   voice: () => json<VoiceConfig>("/api/voice"),
   /** The voices the speech engine has registered in its own registry (OmniVoice); empty for the other engines. */
   voiceEngines: () => json<{ runtime: string; voices: string[]; error?: string }>("/api/voice/engines"),
@@ -1731,4 +1739,9 @@ export interface AvailableModel {
   contextWindow?: number;
   input?: string[];
   reasoning: boolean;
+}
+
+export interface SpeakerExample {
+  id:string;session_id:string;label:string;created:number;seconds:number;
+  person:string|null;expires_at:number|null;start_sample:number;end_sample:number;
 }

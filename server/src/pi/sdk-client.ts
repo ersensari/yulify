@@ -28,6 +28,7 @@ import { CONTEXT_FILES, SHARED_FILES } from "./context-files.js";
 import { heartbeatTool } from "./heartbeat-tool.js";
 import { askPrimaryTool } from "./ask-primary.js";
 import { enrollVoiceOn, enrollVoiceTool } from "./enroll-voice.js";
+import { meetingTool } from "./meeting-tool.js";
 import { proxyBaseUrl } from "../llama-progress.js";
 import { bridgeSubagents, SUBAGENT_INPUT, SUBAGENT_STOP, type Bridge } from "../subagent-protocol.js";
 import { contextWindowFor, getSession, getSkipThinkingProviders, getVoiceInstructions, portalBrowserOn, voiceSpeaks } from "../db.js";
@@ -176,6 +177,23 @@ function portalLoader(pi: any): new (options: unknown, rule: AudioRule, said?: (
       super(options);
       this.rule = rule;
       this.said = said;
+    }
+    getExtensions(): any {
+      const result = super.getExtensions();
+      const bundled = bundledPath("extensions/subagent");
+      const owner = bundled && result.extensions.find((extension: any) =>
+        path.resolve(extension.resolvedPath ?? extension.path) === path.join(bundled, "index.ts") &&
+        extension.tools.has("subagent"));
+      if (!owner) return result;
+      // The guard-support handshake belongs to this launcher, not another
+      // installed package registering the same name. Keep the bundled tool
+      // authoritative before Pi builds its tool registry.
+      return { ...result, extensions: result.extensions.map((extension: any) => {
+        if (extension === owner || !extension.tools.has("subagent")) return extension;
+        const tools = new Map(extension.tools);
+        tools.delete("subagent");
+        return { ...extension, tools };
+      }) };
     }
     getAppendSystemPrompt(): string[] {
       return [...super.getAppendSystemPrompt(), ...this.said(), ...(this.rule?.lines() ?? [])];
@@ -388,16 +406,20 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     // Without an explicit loader the SDK starts with no extensions, skills or
     // prompt templates — so installed packages contribute no commands at all.
     // The CLI wires this up for you; here it has to be asked for.
+    const sessionRef: { current?: any } = {};
+    const thinkingOff = () => {
+      const level = sessionRef.current?.thinkingLevel ?? (opts.sessionId ? getSession(opts.sessionId)?.thinking_level : undefined) ?? opts.thinkingLevel;
+      return level === "off";
+    };
     const voiceFirst = new VoiceFirstTurn(
       getSkipThinkingProviders,
       needsTools,
-      () => (opts.sessionId ? getSession(opts.sessionId)?.thinking_level === "off" : false),
+      thinkingOff,
     );
     let resourceLoader: any;
     // What the conversation has switched off: the client's, once there is one.
     let switchedOff: () => ReadonlySet<string> = () => new Set(opts.toolsOff ?? []);
     // The session exists only after the factories have run: the background tool resolves its tools through it, once it is set.
-    const sessionRef: { current?: any } = {};
     // Whether the model has the tool is settled when pi loads it and by the tool switches: the rule says
     // so only while it has — and it is the portal's, not an extension's of the same name that pi keeps.
     const imageTool = opts.sessionId ? new GenerateImageTool(opts.cwd, () => resourceLoader?.getExtensions?.().extensions ?? [], opts.sessionId) : undefined;
@@ -418,6 +440,19 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       // after it reads something untrusted, and any session can read something.
       const factories: { name: string; factory: (pi: any) => void }[] = [
         { name: "voice-first", factory: voiceFirst.extension },
+        { name: "explicit-thinking-off", factory: (pi: any) => {
+          pi.on("before_provider_request", (event: any, ctx: any) => {
+            // The live Pi setting is authoritative, including default off and
+            // changes made in chat. Tool routing cannot turn it back on.
+            const provider = ctx.model?.provider;
+            if (!thinkingOff() || !(provider === "forgeloop-provider" || isLlamaProvider(provider))) return;
+            const payload = { ...event.payload, reasoning_effort: "none",
+              chat_template_kwargs: { ...event.payload.chat_template_kwargs, enable_thinking: false } };
+            delete payload.thinking_budget_tokens;
+            delete payload.reasoning_budget_tokens;
+            return payload;
+          });
+        } },
         // After a model switch, the earlier model's thinking is not handed on as answer text: see #60.
         { name: "cross-model-thinking", factory: crossModelThinkingExtension },
         { name: "guard", factory: guardExtension(
@@ -431,6 +466,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
           ) },
       ];
       if (opts.sessionId) factories.push({ name: "client-controls", factory: clientControlTools(opts.sessionId) });
+      if (opts.sessionId && (!opts.role || opts.role === "primary")) factories.push({ name: "meeting-tools", factory: meetingTool(opts.sessionId) });
       if (canvases) factories.push({ name: "canvases", factory: canvases.extension });
       // Beside the canvases: both are how the agent puts something on the screen.
       if (opts.sessionId) factories.push({ name: SHOW_IMAGE_SOURCE, factory: showImageTool(opts.cwd) });

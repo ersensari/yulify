@@ -17,6 +17,7 @@ import express, { type Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { getSession } from "../db.js";
+import { asrBase, sharedAsr } from "../shared-asr.js";
 import { voiceHeaders } from "../voice-auth.js";
 
 const MAX_AUDIO = "512mb";
@@ -102,6 +103,31 @@ export function speechRouter(): Router {
   router.delete("/speech/speakers/:name", async (req, res) => {
     const base = guard(res);
     if (base) await relay(res, `${base}/v1/speakers/${encodeURIComponent(String(req.params.name))}`, { method: "DELETE" });
+  });
+
+  router.get("/voice/speaker-examples", async (req,res) => {
+    const offset=Number(req.query.offset||0);
+    if(!Number.isInteger(offset)||offset<0||offset>10000)return res.status(400).json({error:"Invalid page offset"});
+    try {res.json(await sharedAsr(`/examples?offset=${offset}`));}
+    catch(e) {res.status(502).json({error:(e as Error).message});}
+  });
+  router.get("/voice/speaker-examples/:id/audio", async(req,res) => {
+    if (!/^[a-f0-9]{32}$/.test(String(req.params.id)))return res.status(400).json({error:"Invalid example id"});
+    try {
+      const upstream=await fetch(`${asrBase()}/v1/asr/examples/${req.params.id}/audio`,{redirect:"error",signal:AbortSignal.timeout(15_000)});
+      if(!upstream.ok)return res.status(upstream.status).json({error:"Speaker example not found or expired"});
+      res.setHeader("Cache-Control","no-store");res.type("audio/wav").send(Buffer.from(await upstream.arrayBuffer()));
+    }catch(e){res.status(502).json({error:(e as Error).message});}
+  });
+  router.put("/voice/speaker-examples/:id", async(req,res)=>{
+    if (!/^[a-f0-9]{32}$/.test(String(req.params.id)))return res.status(400).json({error:"Invalid example id"});
+    try{res.json(await sharedAsr(`/examples/${req.params.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({person:req.body?.person})}));}
+    catch(e){res.status(502).json({error:(e as Error).message});}
+  });
+  router.delete("/voice/speaker-examples/:id", async(req,res)=>{
+    if (!/^[a-f0-9]{32}$/.test(String(req.params.id)))return res.status(400).json({error:"Invalid example id"});
+    try{res.json(await sharedAsr(`/examples/${req.params.id}`,{method:"DELETE"}));}
+    catch(e){res.status(502).json({error:(e as Error).message});}
   });
 
   return router;

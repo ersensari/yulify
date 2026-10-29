@@ -425,3 +425,22 @@ body.is-resizing iframe { pointer-events: none; }
 /* The canvas hangs over the stage rather than in it, and would stay on top of
    the browser: it waits, in its place, until the browser is restored. */
 .session-workspace:has(.voice-browser-window.is-open.is-maximized) .session-canvases { visibility: hidden; }
+
+/* Whisper's recognized text, directly above the voice controls. */
+.voice-input-transcript { width:100%; max-height:190px; overflow:auto; margin:12px 0 4px; padding:0; color:rgb(var(--fg)); font-size:14px; line-height:1.5; text-align:center; white-space:pre-wrap; overflow-wrap:anywhere; }
+/* Keep recognized text inside the compact dock, clear of the open panels.
+   Beside/free layouts retain their full-size transcript underneath the orb. */
+.voice-stage.is-docked[data-orb="dock"] .voice-dock-center { align-self:stretch; width:auto; max-height:calc(100% - 12px); min-height:0; margin:6px 0; overflow:hidden; gap:3px; }
+.voice-stage.is-docked[data-orb="dock"] .voice-dock-center > * { min-width:0; min-height:0; }
+.voice-stage.is-docked[data-orb="dock"] .voice-status { flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.voice-stage.is-docked[data-orb="dock"] .voice-input-transcript { position:static; width:100%; max-height:34px; margin:0; color:#edf5ff; font-size:12px; line-height:17px; text-align:left; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+.voice-stage.is-docked[data-orb="dock"] .voice-dock-center:has(.voice-input-transcript) .voice-thought-stream { height:17px; max-height:17px; flex-shrink:0; white-space:nowrap; text-overflow:ellipsis; mask-image:none; }
+.voice-stage.is-docked[data-orb="dock"] .voice-speaker { flex-shrink:0; margin:0; padding:0; font-size:10px; line-height:12px; text-align:left; color:#acc9ee; background:none; }
+.voice-stage.is-docked[data-orb="dock"] .activity-progress { width:100%; padding:0; flex-shrink:0; }
+.voice-stage.is-docked[data-orb="dock"] .activity-progress-track { margin-top:4px; }
+.voice-stage.is-docked[data-orb="dock"] .voice-stage-controls { align-self:center; flex-shrink:0; }
+@media (max-width:600px) {
+  .voice-stage.is-docked .voice-input-transcript { position:static; margin:0; max-height:17px; font-size:12px; line-height:17px; text-align:left; overflow:hidden; }
+  .voice-stage.is-docked .voice-dock-center { max-height:56px; min-height:0; overflow:hidden; }
+}
+@media (max-height:650px) { .voice-input-transcript { max-height:130px; } }

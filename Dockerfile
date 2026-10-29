@@ -90,3 +90,4 @@ RUN mkdir -p /data/home /data/bin
 EXPOSE 4100
 VOLUME /data
 CMD ["/usr/local/bin/node", "server/dist/index.js"]
+LABEL forgeloop.managed="true" forgeloop.project="forgeloop-ai" forgeloop.resource="yulify-image"

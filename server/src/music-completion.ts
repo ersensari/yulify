@@ -47,11 +47,11 @@ export class MusicCompletion {
             finished = true;
           }
         } else if (response.status === 404) {
-          this.notify(row.sessionId, row.jobId, "Müzik işi bulunamadı.");
+          this.notify(row.sessionId, row.jobId, "Music job not found.");
           finished = true;
         }
         if (!finished && Date.now() - row.since > 24 * 60 * 60 * 1000) {
-          this.notify(row.sessionId, row.jobId, "Müzik üretimi zaman aşımına uğradı.");
+          this.notify(row.sessionId, row.jobId, "Music generation timed out.");
           finished = true;
         }
       } catch (error) { console.warn("[music] Completion check will retry:", String(error)); }

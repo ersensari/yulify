@@ -12,20 +12,20 @@
 @layer base {
   :root,
   [data-theme="dark"] {
-    --canvas: 10 10 12;
-    --surface: 20 20 23;
-    --raised: 32 32 36;
-    --line: 44 44 50;
+    --canvas: 7 12 20;
+    --surface: 12 22 34;
+    --raised: 21 35 49;
+    --line: 40 65 82;
 
     /* Each of the three quieter tones reads at 4.5:1 or more on every surface and on a hovered row
        (tests/theme-contrast.test.mts), so that a hint is never a strain; they differ in weight, not in legibility. */
-    --fg: 245 245 247;
-    --fg-muted: 185 185 195;
-    --fg-subtle: 163 163 173;
-    --fg-faint: 148 148 158;
+    --fg: 232 248 255;
+    --fg-muted: 185 209 223;
+    --fg-subtle: 165 188 204;
+    --fg-faint: 151 174 190;
 
-    --accent: 34 211 238;
-    --accent-fg: 10 10 12;
+    --accent: 108 227 255;
+    --accent-fg: 7 12 20;
     --ok: 52 211 153;
     --warn: 251 191 36;
     --danger: 248 113 113;

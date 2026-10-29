@@ -358,7 +358,7 @@ test("instructions saved in the middle of a conversation apply from its next spo
     const second = await say(client, "Spoken again", true);
     assert.ok(second.includes(audioSystemRule("Second wording.")));
     assert.doesNotMatch(second, /First wording/);
-    assert.equal(second.split("Do not read the marker aloud").length, 2, "the rule once");
+    assert.equal(second.split("The portal prefixes user requests sent in voice mode").length, 2, "the rule once");
     assert.equal(await say(client, "Spoken once more", true), second, "and then no change");
   } finally {
     client.dispose();

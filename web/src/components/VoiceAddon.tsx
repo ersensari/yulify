@@ -1,3 +1,6 @@
+import { getVoiceLayout, setVoiceLayout, type VoiceLayout } from '../voice-layout';
+import { SpeakerExamples } from "./SpeakerExamples";
+import { SpeechRecognitionSettings } from "./SpeechRecognitionSettings";
 import { VoiceLibrary, kokoroVoiceOptions } from './VoiceLibrary';
 import { VoiceEngines } from './VoiceEngines';
 import { Select } from "./Select";
@@ -45,6 +48,7 @@ export function VoiceAddon({ onError }: { onError: (message: string) => void }) 
   const [providersText, setProvidersText] = useState<string | null>(null);
   // Something changed on this page that Save has not stored: in no other place, so closing Settings asks first.
   const [edited, setEdited] = useState(false);
+  const [layout,setLayout]=useState<VoiceLayout>(getVoiceLayout);
   // Settings from the server replace what was typed, which would otherwise show a list other than the one saved.
   const fromServer = (value: VoiceConfig) => { setConfig(value); setProvidersText(null); setEdited(false); };
   const [install, setInstall] = useState<VoiceInstallStatus | null>(null);
@@ -101,6 +105,11 @@ export function VoiceAddon({ onError }: { onError: (message: string) => void }) 
   useUnsavedDraft(edited && !busy);
   // A saved voice's description is stored on its own; this saves the edited ones along with the settings.
   const pendingDescriptions = useRef<(() => Promise<void>) | null>(null);
+  const pendingRecognition = useRef<(() => Promise<void>) | null>(null);
+  const recognitionPending = useCallback((save: (() => Promise<void>) | null) => {
+    pendingRecognition.current=save;
+    if (save) setSaved(false);
+  }, []);
   // Nothing of the page can be drawn without it, so the failure is said where the page would be.
   const [readFailed, setReadFailed] = useState<string | null>(null);
   const readConfig = () => api.voice().then(value => { setReadFailed(null); setConfig(value); }, e => setReadFailed((e as Error).message));
@@ -133,6 +142,7 @@ export function VoiceAddon({ onError }: { onError: (message: string) => void }) 
   return <div className="mt-4 space-y-4">
     <div><p className="text-sm text-fg">{t("Voice")}</p><p className="mt-1 text-xs text-fg-faint">{t("Talk naturally, interrupt anytime, and hear replies in your chosen voice.")}</p></div>
     <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={config.enabled} onChange={e => update({ enabled: e.target.checked })} />{listening ? t("Enable dictation in sessions") : t("Enable voice controls in sessions")}</label>
+    <div className="rounded-xl border border-line p-4"><label className="block text-sm font-medium">{t('Voice conversation view')}<select aria-label={t('Voice conversation view')} className="mt-2 block w-full rounded-lg border border-line bg-raised p-2 text-sm" value={layout} onChange={event=>{setLayout(event.target.value as VoiceLayout);setEdited(true);setSaved(false);}}><option value="full">{t('Full-size orb')}</option><option value="mini">{t('Mini orb above the message box')}</option></select></label><p className="mt-2 text-xs text-fg-muted">{t('Mini mode keeps the chat and message box visible. Speak or type; replies are spoken aloud. Saved for this browser or desktop app.')}</p></div>
     {listening && <p role="status" className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">{t("This installation has no speech synthesis: replies are not spoken and voice mode is off. Dictation, which only listens, works.")}</p>}
     {!listening && <section className="rounded-xl border border-line bg-surface/50 p-4 space-y-4">
       <div><h3 className="text-sm font-medium">{t("Your voice")}</h3><p className="mt-1 text-xs text-fg-muted">{t("Choose how your assistant sounds.")}</p></div>
@@ -172,8 +182,10 @@ export function VoiceAddon({ onError }: { onError: (message: string) => void }) 
         <button type="button" className={btnCls} disabled={instructions.trim() === builtIn.trim()} onClick={() => update({ responseInstructions: builtIn })}>{t("Reset to default")}</button>
       </div>
     </details>}
+    <SpeechRecognitionSettings onPending={recognitionPending} saving={busy} />
+    <SpeakerExamples />
     <details className="rounded-xl border border-line p-4">
-      <summary className="cursor-pointer text-sm font-medium">{t("Speech detection")}<span className="mt-1 block text-xs font-normal text-fg-muted">{t("Turn timing and microphone sensitivity · Silero VAD")}</span></summary>
+      <summary className="cursor-pointer text-sm font-medium">{t("Browser dictation detection")}<span className="mt-1 block text-xs font-normal text-fg-muted">{t("Legacy browser dictation only · live Whisper uses Speech recognition above")}</span></summary>
       <div className="mt-4 space-y-4">
         <p className="text-xs text-fg-faint">{t("Save, then restart voice mode to apply. Shorter silence responds faster but can cut off pauses.")}</p>
         {([
@@ -221,7 +233,7 @@ export function VoiceAddon({ onError }: { onError: (message: string) => void }) 
     </details>
     <div className="sticky -bottom-4 z-10 -mx-5 !-mb-4 flex justify-end border-t border-line bg-raised px-5 pt-3 pb-7">
     <button disabled={busy} className="rounded-lg bg-accent px-4 py-2 text-xs font-medium text-black disabled:opacity-40" onClick={async () => {
-      setBusy(true); try { await pendingDescriptions.current?.(); fromServer(await api.setVoice(toSave())); setSaved(true); window.dispatchEvent(new Event('voice-config-changed')); } catch (e) { onError((e as Error).message); } finally { setBusy(false); }
+      setBusy(true); try { await pendingRecognition.current?.(); await pendingDescriptions.current?.(); fromServer(await api.setVoice(toSave())); setVoiceLayout(layout); setSaved(true); window.dispatchEvent(new Event('voice-config-changed')); } catch (e) { onError((e as Error).message); } finally { setBusy(false); }
     }}>{busy ? t("Saving…") : saved ? t("Saved") : t("Save voice settings")}</button>
     </div>
   </div>;

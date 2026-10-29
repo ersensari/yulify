@@ -147,6 +147,8 @@ const CONTAINER_SESSION_DIR = "/sessions/";
 /** What can go with a message besides its text. */
 export interface PromptOptions {
   voice?: boolean;
+  /** Cancels a transport-owned prompt before it can enter Pi. */
+  signal?: AbortSignal;
   /** Pictures, already checked and kept: see prompt-images.ts. */
   images?: Attached[];
   /** Mid-run, go into the run that is going instead of waiting for it to end. */
@@ -846,7 +848,7 @@ class SessionManager extends EventEmitter {
     if (getDb().prepare("SELECT 1 FROM events WHERE session_id = ? AND type = 'portal_music_ready' AND json_extract(payload, '$.jobId') = ? LIMIT 1").get(sessionId, jobId)) return;
     this.record(sessionId, "portal_music_ready", {
       jobId, error: !!error,
-      text: error ? `Müzik üretilemedi: ${error}` : "Müzik hazır. Oynat düğmesine basarak dinleyebilirsin.",
+      text: error ? `Music generation failed: ${error}` : "Your music is ready. Press Play to listen.",
     });
   });
 
@@ -1457,7 +1459,7 @@ class SessionManager extends EventEmitter {
     // Stop pressed while pi was still starting for it. There was no run to
     // abort then, so it is honoured here: the message goes back to the person
     // as not sent, where it would otherwise be answered seconds later.
-    if ((this.stops.get(sessionId) ?? 0) !== stopsBefore) {
+    if (options?.signal?.aborted || (this.stops.get(sessionId) ?? 0) !== stopsBefore) {
       const prompt = {
         message,
         ...(options?.voice ? { voice: true } : {}),
@@ -1610,6 +1612,7 @@ class SessionManager extends EventEmitter {
       // An attached picture is also a file in the chat's folder, named at the end of what pi gets, so edit_image can take it.
       const workspace = images.length && !isCommand ? getSession(sessionId)?.workspace : undefined;
       const toPi = workspace ? message + attachmentsBlock(keepAttached(workspace, images)) : message;
+      if (options?.signal?.aborted) throw new Error("Voice turn cancelled before dispatch");
       const sent = client.prompt(toPi, {
         voice: options?.voice,
         ...(images.length ? { images: forPi(images) } : {}),
@@ -2115,6 +2118,11 @@ class SessionManager extends EventEmitter {
     opts: {
       beforeTurn?: () => Promise<void> | void;
       timeoutMs?: number;
+      /** Use the ordinary voice prompt marker and the same Pi session. */
+      voice?: boolean;
+      signal?: AbortSignal;
+      onTextDelta?: (delta: string) => void;
+      onMessageEnd?: (text: string, seq?: number) => void;
       /**
        * Relays what happens during the run — assistant prose as each stretch
        * completes, and the name of every tool as it starts.
@@ -2156,7 +2164,11 @@ class SessionManager extends EventEmitter {
           opts.onReply,
           opts.streamText,
           opts.onUi,
-          opts.onStopped
+          opts.onStopped,
+          opts.voice,
+          opts.onTextDelta,
+          opts.onMessageEnd,
+          opts.signal
         );
       });
     // Kept only while it is the newest, so a finished chain is not held forever.
@@ -2186,7 +2198,11 @@ class SessionManager extends EventEmitter {
     onReply?: (text: string) => void | Promise<void>,
     streamText = true,
     onUi?: (request: any) => void,
-    onStopped?: () => void
+    onStopped?: () => void,
+    voice = false,
+    onTextDelta?: (delta: string) => void,
+    onMessageEnd?: (text: string, seq?: number) => void,
+    signal?: AbortSignal
   ): Promise<string> {
     // Counted before pi is started here, not in submit: a Stop that comes while
     // it starts is counted by then, and submit would take it for one that was
@@ -2208,11 +2224,12 @@ class SessionManager extends EventEmitter {
     // run that produced it.
     const relay = (line: string) => void Promise.resolve(onReply?.(line)).catch(() => {});
 
-    const flush = () => {
+    const flush = (seq?: number) => {
       const done = current.trim();
       current = "";
       if (!done) return;
       all.push(done);
+      onMessageEnd?.(done, seq);
       if (streamText) relay(done);
     };
 
@@ -2232,17 +2249,18 @@ class SessionManager extends EventEmitter {
           // Thinking deltas are not the answer, and nobody in a chat wants them.
           if (inner.type === "text_delta" && typeof inner.delta === "string") {
             current += inner.delta;
+            onTextDelta?.(inner.delta);
           }
           break;
         }
         case "message_end":
-          flush();
+          flush(row.seq);
           break;
 
         case "tool_execution_start": {
           if (!onReply) break;
           // Prose first: a tool line landing mid-sentence reads badly.
-          flush();
+          flush(row.seq);
           const { name, detail } = describeToolCall(payload);
           relay(detail ? `⚙ ${name} · ${detail}` : `⚙ ${name}`);
           break;
@@ -2257,7 +2275,7 @@ class SessionManager extends EventEmitter {
           // An extension's news, or its failure, belongs to a channel only if it
           // was for the command that channel sent.
           if (payload.from === "extension" && (mine === undefined || (payload.of !== mine && payload.command !== mine))) break;
-          flush();
+          flush(row.seq);
           if (typeof payload.text === "string" && payload.text.trim()) {
             all.push(payload.text.trim());
             if (streamText) relay(payload.text.trim());
@@ -2269,7 +2287,7 @@ class SessionManager extends EventEmitter {
         case "extension_ui_request":
           // Only a question ends the text so far. A status line or a widget
           // lands anywhere, mid-word included, and cut the reply there.
-          if (isDialog(payload.method)) flush();
+          if (isDialog(payload.method)) flush(row.seq);
           onUi?.(payload);
           break;
 
@@ -2282,11 +2300,11 @@ class SessionManager extends EventEmitter {
         // Not the end of the work, though — a retry, a compaction or a queued
         // message all come after it, and answering here cut them off.
         case "agent_end":
-          flush();
+          flush(row.seq);
           break;
 
         case "agent_settled":
-          flush();
+          flush(row.seq);
           settle?.();
           break;
 
@@ -2297,7 +2315,7 @@ class SessionManager extends EventEmitter {
           // until the timeout — and because asks are serialised per session,
           // every later message in that chat queued behind it.
           if (payload.status === "idle") {
-            flush();
+            flush(row.seq);
             settle?.();
           }
           break;
@@ -2324,7 +2342,7 @@ class SessionManager extends EventEmitter {
       finished.catch(() => {});
       // Stopped before it was sent: nothing for the channel to wait on, and what
       // it had to tell the agent is still to be told.
-      if ((await this.prompt(sessionId, prepared.message, undefined, false, stopsBefore)) === false) {
+      if ((await this.prompt(sessionId, prepared.message, voice || signal ? { voice, signal } : undefined, false, stopsBefore)) === false) {
         onStopped?.();
         return "";
       }
@@ -2403,17 +2421,18 @@ class SessionManager extends EventEmitter {
 
   private duplexAssistantResponses = new Map<string, Set<string>>();
 
-  /** Persist one final, already-sanitized Gemma assistant response. User words are never inferred here. */
-  recordDuplexAssistant(sessionId: string, responseId: string, text: string): boolean {
+  /** Persist one final, already-sanitized voice assistant response. User words are never inferred here. */
+  recordDuplexAssistant(sessionId: string, responseId: string, text: string, liveModel?: {provider: string; id: string}): boolean {
     if (!getSession(sessionId) || !responseId || responseId.length > 256 || !text.trim() || Buffer.byteLength(text, "utf8") > 16_384) return false;
     let seen = this.duplexAssistantResponses.get(sessionId);
     if (!seen) { seen = new Set(); this.duplexAssistantResponses.set(sessionId, seen); }
     if (seen.has(responseId)) return false;
     seen.add(responseId);
     if (seen.size > 128) seen.delete(seen.values().next().value!);
+    const selected = liveModel ? { provider: liveModel.provider, model: liveModel.id } : chatModel(getSession(sessionId)!);
     const message = {
       id: responseId, role: "assistant", content: [{ type: "text", text }],
-      api: "openai-completions", provider: "forgeloop-provider", model: "gemma4-e4b",
+      api: "openai-completions", provider: selected.provider, model: selected.model,
       usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
       stopReason: "stop", timestamp: Date.now(),
     };

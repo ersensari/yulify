@@ -113,6 +113,7 @@ services:
       TELEGRAM_TTS_MODEL: ${TELEGRAM_TTS_MODEL:-}
       # bearer key for forgeloop-ai-voice (STT, TTS, speakers, convert); sent on every voice request, empty = no header
       VOICE_API_KEY: ${VOICE_API_KEY:-}
+      MUSIC_SERVICE_URL: ${MUSIC_SERVICE_URL:-http://127.0.0.1:10111}
       # bearer key for local services (the LiveKit voice agent): accepted on direct 127.0.0.1 connections only, never via Caddy
       PORTAL_SERVICE_KEY: ${PORTAL_SERVICE_KEY:-}
       # Native MiniCPM LiveKit room issuance. API secrets stay in the host .env;
@@ -121,6 +122,7 @@ services:
       LIVEKIT_SERVER_URL: ${LIVEKIT_SERVER_URL:-http://127.0.0.1:7880}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      YULIFY_DUPLEX_ROUTER_MODEL: qwen36-microturn-poly
       YULIFY_STRATA_SUBAGENT_MODEL: ${YULIFY_STRATA_SUBAGENT_MODEL:-forgeloop-provider/ornith-1-5-122b-iq3-m}
       # rnnoise (default), gtcrn or off: what cleans the microphone before the VAD hears it.
       VOICE_NOISE_MODEL: ${VOICE_NOISE_MODEL:-}

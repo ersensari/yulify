@@ -1,3 +1,5 @@
+import { useVoiceLayout } from '../voice-layout';
+import { sendVoiceText } from '../voice-text';
 import { StatusIndicator } from "./ChatActivity";
 import { TranscriptRow, type RowActions } from "./TranscriptRow";
 import { useStableActions } from "../use-stable-actions";
@@ -43,7 +45,7 @@ import { TitleInput } from "./TitleInput";
 import { keepFileActivity, latestFileActivity, type FileActivity } from "../file-activity";
 import { caretFrom, drafts, withUnsent } from "../drafts";
 import { onFill } from "../editor-fills";
-import { local } from "../safe-storage";
+import { local, session as tabStorage } from "../safe-storage";
 import { fancy, glide, launch, leaveRef, mark, settle, useLeaveRef, type Mark } from "../motion";
 import { CLIENT_COMMANDS, isClientCommand, isCommand } from "../client-commands";
 import { isComposing, isEnter, opensComposer, stopsRun } from "../shortcuts";
@@ -228,6 +230,9 @@ export function Chat({
   const caret = useRef<{ start: number; end: number } | null>(null);
   const caretTo = useRef<number | null>(null);
   const [voiceMode, setVoiceMode] = useState(false);
+  const voiceLayout=useVoiceLayout();
+  const fullVoice=voiceMode&&voiceLayout==='full';
+  const [miniVoiceHost,setMiniVoiceHost]=useState<HTMLDivElement|null>(null);
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [voiceHost, setVoiceHost] = useState<HTMLDivElement | null>(null);
   // Sends and uploads on their way, by the chat they are for: this is one component for every chat, and what is
@@ -330,7 +335,7 @@ export function Chat({
   const fileAnswered = useCallback(() => setFileAsked(null), []);
   useEffect(() => setFileAsked(null), [session.id]);
   useWorkPanels(
-    { browser: !voiceMode && watching, terminal: !voiceMode && terminal, canvas: canvasOpen, files: !voiceMode && files, git: !voiceMode && git, agents: !voiceMode && agentsOpen },
+    { browser: !fullVoice && watching, terminal: !fullVoice && terminal, canvas: canvasOpen, files: !fullVoice && files, git: !fullVoice && git, agents: !fullVoice && agentsOpen },
     panel => { if (panel === "browser") setWatching(false); else if (panel === "terminal") setTerminal(false); else if (panel === "files") setFiles(false); else if (panel === "git") setGit(false); else if (panel === "agents") setAgentsOpen(false); else setCanvasOpen(false); },
     // A third panel closes another one instead, while Files has an edit in it.
     // An edit not saved outweighs keeping Git in view: with both kept nothing
@@ -1207,7 +1212,10 @@ export function Chat({
           // — rather than waiting for it to finish, which on a long run looked
           // like the message had gone nowhere. Voice mode has its own switch.
           const steer = running && !voiceMode;
-          await onSend(
+          if(voiceMode && !known && tabStorage.get('voiceDuplexActive')===session.id){
+            if(images.length)throw new Error('Use voice text without image attachments, or end voice to send images.');
+            await sendVoiceText(session.id,msg);
+          } else await onSend(
             known ? known.wire : msg,
             voiceMode || images.length || steer
               ? { voice: voiceMode || undefined, images: images.length ? images : undefined, steer: steer || undefined }
@@ -1673,8 +1681,8 @@ export function Chat({
     <div className="session-workspace relative flex h-full min-h-0 flex-col">
       {pictures.viewer}
       <CanvasPanel key={session.id} sessionId={session.id} folder={session.workspace} open={canvasOpen} setOpen={setCanvasOpen}/>
-      <div ref={setVoiceHost} className={voiceMode ? "flex min-h-0 flex-1 flex-col" : "hidden"} />
-      <header className={voiceMode ? "hidden" : "chat-header border-b border-line px-4 py-3 max-md:px-3 max-md:py-2"}>
+      <div ref={setVoiceHost} className={fullVoice ? "flex min-h-0 flex-1 flex-col" : "hidden"} />
+      <header className={fullVoice ? "hidden" : "chat-header border-b border-line px-4 py-3 max-md:px-3 max-md:py-2"}>
         <div className="mx-auto flex w-full max-w-3xl items-center gap-3 max-md:gap-2">
         {onOpenNavigation && (
           <button type="button" aria-label={t("Open navigation")} aria-controls="mobile-navigation" onClick={onOpenNavigation} className="-ml-1 rounded-lg p-2 text-fg hover:bg-fg/10 md:hidden">
@@ -1767,7 +1775,7 @@ export function Chat({
         </div>
       </header>
 
-      <div ref={body} className={voiceMode ? "hidden" : "chat-body relative flex min-h-0 flex-1 flex-row"}>
+      <div ref={body} className={fullVoice ? "hidden" : "chat-body relative flex min-h-0 flex-1 flex-row"}>
       {placeAside("left")}
       {/* No narrower than 320px beside panels at a side: they give way instead (see placeAside). */}
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${groupAt("left") || groupAt("right") ? "md:min-w-[320px]" : ""}`}>
@@ -1880,6 +1888,7 @@ export function Chat({
         }}
         className="px-4 pb-4 pt-2 sm:px-6 sm:pb-5"
       >
+        <div ref={setMiniVoiceHost} className={voiceMode&&voiceLayout==='mini'?"mx-auto mb-2 w-full max-w-3xl":"hidden"} />
         <div className="prompt-shell relative mx-auto w-full max-w-3xl">
         {/* Scrolled up to read, the way back to the end is one click rather
             than a long drag — and during a run, where the new output is. */}
@@ -2109,7 +2118,7 @@ export function Chat({
                 <LuPaperclip aria-hidden className="h-4 w-4" />
               </button>
               <DictationButton dictation={dictation} />
-              <VoiceControl folder={session.workspace} canvasOpen={canvasOpen} onCanvasMinimize={()=>setCanvasOpen(false)} onCanvasToggle={()=>setCanvasOpen(value=>!value)} key={session.id} sessionId={session.id} items={items} running={running} work={phase} onSend={onSend} onAbort={onAbort} stageTarget={voiceHost} onModeChange={setVoiceMode} title={session.title} browserAvailable={browserUp} browserActivity={browserActivity} terminalActivity={terminalActivity} toolEvents={events} />
+              <VoiceControl folder={session.workspace} canvasOpen={canvasOpen} onCanvasMinimize={()=>setCanvasOpen(false)} onCanvasToggle={()=>setCanvasOpen(value=>!value)} key={session.id} sessionId={session.id} items={items} running={running} work={phase} onSend={onSend} onAbort={onAbort} stageTarget={voiceLayout==='mini'?miniVoiceHost:voiceHost} voiceLayout={voiceLayout} onModeChange={setVoiceMode} title={session.title} browserAvailable={browserUp} browserActivity={browserActivity} terminalActivity={terminalActivity} toolEvents={events} />
               <MeetingNotes key={`meeting-${session.id}`} sessionId={session.id} />
               {/* Mid-run, Stop stays while a message is written: it is the
                   moment the agent is seen going the wrong way, and whether to

@@ -2,10 +2,10 @@ import { randomBytes } from "node:crypto";
 import { Type } from "typebox";
 import { deface, envelope, taintSession } from "./guard.js";
 import { AUDIO_MESSAGE_PREFIX } from "./voice-first.js";
-import { BACKGROUND_SOURCE, BACKGROUND_TOOL } from "./background-names.js";
+import { BACKGROUND_MEMORY_WRITES, BACKGROUND_SOURCE, BACKGROUND_TOOL } from "./background-names.js";
 
 /**
- * Slow web and picture tools run in the background: a search or a picture takes
+ * Slow web/picture tools and mem0 fact writes run in the background. A search or picture takes
  * long enough that a spoken reply would stop mid-sentence while Pi waits for it.
  * This starts the tool, returns at once, and sends its result back as a follow-up
  * message when it settles, so the agent reads it out then.
@@ -19,8 +19,8 @@ import { BACKGROUND_SOURCE, BACKGROUND_TOOL } from "./background-names.js";
 
 export { BACKGROUND_SOURCE, BACKGROUND_TOOL };
 
-/** The only tools that may run in the background: slow, and either web or picture. */
-export const BACKGROUND_ALLOWED = new Set(["web_search", "fetch_content", "get_search_content", "generate_image", "edit_image"]);
+/** Explicit allowlist: slow web/picture work and mem0 fact writes; never memory reads or deletes. */
+export const BACKGROUND_ALLOWED = new Set(["web_search", "fetch_content", "get_search_content", "generate_image", "edit_image", ...BACKGROUND_MEMORY_WRITES]);
 /**
  * The slow ones of those: in a SPOKEN turn they may not be called directly, since the reply would stop mid-sentence while pi waits for them.
  * The model was told so in its instructions and still called them (2026-10-21: generate_image blocked a spoken turn for 40 s), so the call is
@@ -61,9 +61,28 @@ const refused = (text: string) => ({ content: [{ type: "text" as const, text }],
 export function backgroundTool(opts: BackgroundToolOptions) {
   return (pi: any) => {
     let counter = 0;
+    // Preserve the order of corrections to the same memory within this chat.
+    let memoryTail: Promise<unknown> = Promise.resolve();
+    // Keep raw MCP execution separate from the nonblocking public definition.
+    // Pi's wrappers resolve definition.execute at call time, after guard hooks.
+    const memoryExecutors = new WeakMap<RunnableTool, RunnableTool["execute"]>();
     pi.on?.("tool_call", (event: any) => {
-      if (!opts.spoken() || !BACKGROUND_FORCED.has(String(event?.toolName))) return undefined;
+      const memoryWrite = BACKGROUND_MEMORY_WRITES.has(String(event?.toolName));
+      if (!memoryWrite && (!opts.spoken() || !BACKGROUND_FORCED.has(String(event?.toolName)))) return undefined;
       const args = JSON.stringify(event.input ?? {});
+      if (memoryWrite) {
+        // The guard already checked the original memory call. Do not return a
+        // tool error and rely on the model to retry using another tool name.
+        const name = String(event.toolName);
+        const target = opts.getTool(name);
+        if (!target) return { block: true, reason: "The memory write tool is unavailable; nothing was queued or saved." };
+        if (!memoryExecutors.has(target)) {
+          memoryExecutors.set(target, target.execute);
+          target.execute = (id, input, signal, onUpdate, ctx) =>
+            background.execute(id, { tool: name, args: input }, signal, onUpdate, ctx);
+        }
+        return undefined;
+      }
       return {
         block: true,
         reason:
@@ -75,31 +94,37 @@ export function backgroundTool(opts: BackgroundToolOptions) {
     // Stop aborts these; a job leaves the registry once it settles.
     const running = new Map<number, AbortController>();
 
-    pi.registerTool({
+    const background = {
       name: BACKGROUND_TOOL,
       label: "run in background",
       description:
         "Run a SLOW web or picture tool in the background so the conversation does not stop: web_search, fetch_content, " +
-        "get_search_content, generate_image, edit_image. Give the tool name and its exact arguments. It returns at once; tell the " +
+        "get_search_content, generate_image, edit_image. Also use it for mem0_memory_add (new facts and updates) in both typed and spoken turns. " +
+        "For a memory write, continue answering the original request; saving is pending until the follow-up confirms completion. " +
+        "Never repeat a pending write or read it back before completion. Memory searches must be called directly. " +
+        "For web and picture work, give the tool name and its exact arguments. It returns at once; tell the " +
         "person in one short sentence what you started and END YOUR TURN (do not call tools to wait for it or to look for the " +
-        "result). When the tool is done its result arrives by itself as a message and you tell the person the outcome, briefly. Only these five tools run in the background; call every other tool " +
+        "result). When the tool is done its result arrives by itself as a message and you tell the person the outcome, briefly. Only the listed tools run in the background; call every other tool " +
         "directly. Do not use it for quick tools either (read, write, edit, ls, canvas, show_image).",
       parameters: Type.Object({
-        tool: Type.String({ description: "The name of the tool to run: web_search, fetch_content, get_search_content, generate_image or edit_image." }),
+        tool: Type.String({ description: "The name of the tool to run: web_search, fetch_content, get_search_content, generate_image, edit_image or mem0_memory_add." }),
         args: Type.Optional(Type.Object({}, { additionalProperties: true, description: "The tool's arguments, exactly as it takes them." })),
         title: Type.Optional(Type.String({ description: "A few words for the person, in their language, shown as the job's name." })),
       }),
       execute: async (id: string, p: { tool?: unknown; args?: unknown; title?: unknown }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) => {
         const tool = typeof p?.tool === "string" ? p.tool.trim() : "";
         const args = p?.args && typeof p.args === "object" && !Array.isArray(p.args) ? p.args : {};
+        const memoryWrite = BACKGROUND_MEMORY_WRITES.has(tool);
         const title = (typeof p?.title === "string" ? p.title.trim() : "").slice(0, 120) || tool;
 
         if (!tool) return refused("Name the tool to run in the background (tool).");
         if (tool === BACKGROUND_TOOL) return refused(`${BACKGROUND_TOOL} cannot run itself. Call the tool you want directly.`);
         // A hard list in code, not only the description: anything else is called directly, under the guard's own rules.
-        if (!BACKGROUND_ALLOWED.has(tool)) return refused("Call this tool directly; only slow web and picture tools run in the background.");
+        if (!BACKGROUND_ALLOWED.has(tool)) return refused("Call this tool directly; only the listed web, picture and memory write tools run in the background.");
         if (running.size >= MAX_JOBS) {
-          return refused(`${MAX_JOBS} background jobs are already running. Wait for one to finish, or call the tool directly.`);
+          return refused(memoryWrite
+            ? `${MAX_JOBS} background jobs are already running. This memory write was NOT queued or saved. Continue the conversation and explain that saving could not be started yet; never claim success.`
+            : `${MAX_JOBS} background jobs are already running. Wait for one to finish, or call the tool directly.`);
         }
 
         let target: RunnableTool | undefined;
@@ -147,6 +172,9 @@ export function backgroundTool(opts: BackgroundToolOptions) {
             (showPath
               ? `The picture was made but is not on the person's screen yet: call the show_image tool now (a real tool call, never written as text) with path="${showPath}" and a short title, then say in one sentence that it is ready. `
               : "") +
+            (memoryWrite
+              ? "This is only the status of the earlier memory write: briefly confirm success or explain failure. Do not save this status, repeat the write, or change memory again because of this message. "
+              : "") +
             `Do not call ${BACKGROUND_TOOL} again for it.</background-result>`;
           try {
             opts.beforeFollowUp?.(spoken);
@@ -162,10 +190,14 @@ export function backgroundTool(opts: BackgroundToolOptions) {
 
         running.set(n, controller);
         // Not awaited: this is what lets the turn go on while the tool runs.
-        void (async () => {
+        const previousMemory = memoryTail;
+        const job = (async () => {
           try {
+            if (memoryWrite) await previousMemory;
+            if (controller.signal.aborted) return;
             // The tool's own call, with the same context this call got; onUpdate has nowhere to go in the background.
-            const outcome: any = await target!.execute(`${id}/job-${n}`, args, controller.signal, undefined, ctx);
+            const execute = memoryExecutors.get(target!) ?? target!.execute;
+            const outcome: any = await execute.call(target, `${id}/job-${n}`, args, controller.signal, undefined, ctx);
             const parts = Array.isArray(outcome?.content) ? outcome.content : [];
             const text = parts
               .filter((c: any) => c?.type === "text" && typeof c.text === "string")
@@ -186,15 +218,20 @@ export function backgroundTool(opts: BackgroundToolOptions) {
             finish();
           }
         })();
+        if (memoryWrite) memoryTail = job.catch(() => {});
+        void job;
 
         return {
           content: [{
             type: "text" as const,
-            text: `Started in the background as job ${n}: ${title}. Now say ONE short sentence to the person about what you started and END YOUR TURN: do not call any tool to wait for it, look it up or search again for the same thing. Its result arrives by itself as a later message, and you tell the outcome then.`,
+            text: memoryWrite
+              ? `Memory write queued in the background as job ${n}: ${title}. Continue answering the original request now. Saving is not confirmed yet: do not claim it is saved, repeat this write, or read it back to check. A later follow-up reports success or failure.`
+              : `Started in the background as job ${n}: ${title}. Now say ONE short sentence to the person about what you started and END YOUR TURN: do not call any tool to wait for it, look it up or search again for the same thing. Its result arrives by itself as a later message, and you tell the outcome then.`,
           }],
           details: { job: n, tool, title, status: "started" },
         };
       },
-    });
+    };
+    pi.registerTool(background);
   };
 }

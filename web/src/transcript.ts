@@ -4,6 +4,7 @@ import { argsSummary } from "./tool-args";
 import { toolArgsOf, toolNameOf } from "./tool-payload";
 import { msg, t } from "./i18n";
 import { GENERATED_PICTURE_MARK } from "../../server/src/generated-picture";
+import { stripLeadingVoiceStyle, voiceEnvelopeText } from "./voice-envelope";
 
 /** A picture that went with a message, by the name the server keeps it under. */
 export interface SentImage {
@@ -627,6 +628,11 @@ export function buildTranscript(events: PortalEvent[], options: { ended?: boolea
   for (const item of waiting.values()) items.push({ ...item, queued: true });
   // The answer being given last ends where the chat does, once it is written.
   closeAnswer();
+  for (const item of items) {
+    if (item.kind !== 'assistant') continue;
+    const speech = voiceEnvelopeText(item.text);
+    item.text = stripLeadingVoiceStyle(speech ?? item.text, item.done);
+  }
   return items;
 }
 

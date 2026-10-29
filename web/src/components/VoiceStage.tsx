@@ -1,3 +1,6 @@
+import { setVoiceLayout } from '../voice-layout';
+import { LiveVoiceTranscript } from "./LiveVoiceTranscript";
+import type { LiveVoiceTranscript as TranscriptSnapshot } from "../live-voice-transcript";
 import type { UnknownVoices } from "../speaker-filter";
 import { ActivityProgress } from './ActivityProgress';
 import type { Activity } from '../transcript';
@@ -6,7 +9,7 @@ import { useWorkPanels } from "../use-work-panels";
 import { FilesPanel } from "./FilesPanel";
 import { keepFileActivity, latestFileActivity, type FileActivity } from "../file-activity";
 import { VoiceToolActivity } from "./VoiceToolActivity";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type MutableRefObject, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type MutableRefObject } from "react";
 import type { Item } from "../transcript";
 import { LuMic, LuMicOff, LuX, LuGlobe, LuMaximize2, LuMinimize2, LuMinus, LuTerminal, LuFileText, LuFolderOpen, LuImage, LuImagePlus, LuRotateCcw, LuSquare, LuMessageSquareText, LuSlidersHorizontal } from "react-icons/lu";
 import { VoicePictures, shownPictures } from "./VoicePictures";
@@ -50,18 +53,17 @@ const watchWide = (changed: () => void) => {
 /** Where focus is typing, so Space and a paste belong to that and not to voice mode. */
 const editing = (target: EventTarget | null) => !!(target as Element | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
 
-export function VoiceStage({ legacyControls = true, sessionId, folder, workPhase, canvasOpen, onCanvasMinimize, onCanvasToggle, title, phase, starting, muted, speaking, musicPlaying, levels, error, transcript, speaker, onMute, onEnd, browserAvailable, browserActivity, terminalActivity, toolEvents, sounds, onSounds, onCue,
-  microphoneTools, waitingForTap, items, running, onStop, attachments, onAddPictures, onRemovePicture, canRepeat, onRepeat, rate, onRate, steer, onSteer, unknownVoices, onUnknownVoices, ptt, onPtt, holding, onHold }: {
+export function VoiceStage({ acousticStatus, legacyControls = true, sessionId, folder, workPhase, canvasOpen, onCanvasMinimize, onCanvasToggle, title, phase, starting, muted, speaking, musicPlaying, levels, error, transcript, liveTranscript, speaker, onMute, onEnd, browserAvailable, browserActivity, terminalActivity, toolEvents, sounds, onSounds, onCue,
+  waitingForTap, items, running, onStop, attachments, onAddPictures, onRemovePicture, canRepeat, onRepeat, rate, onRate, steer, onSteer, unknownVoices, onUnknownVoices, ptt, onPtt, holding, onHold }: {
   sessionId: string; folder: string;
   workPhase?: Activity | null;
   canvasOpen: boolean; onCanvasMinimize: () => void; onCanvasToggle: () => void;
   legacyControls?: boolean;
-  title: string; phase: VoicePhase; starting: boolean; muted: boolean; speaking: boolean; musicPlaying?: boolean;
-  levels: MutableRefObject<VoiceLevels>; transcript: string; /** Who spoke it, when the portal could tell (reliable verdicts only are shown). */ speaker?: RtcSpeaker; error: string; onMute: () => void; onEnd: () => void;
+  acousticStatus?: string; title: string; phase: VoicePhase; starting: boolean; muted: boolean; speaking: boolean; musicPlaying?: boolean;
+  levels: MutableRefObject<VoiceLevels>; transcript: string; liveTranscript?: TranscriptSnapshot; /** Who spoke it, when the portal could tell (reliable verdicts only are shown). */ speaker?: RtcSpeaker; error: string; onMute: () => void; onEnd: () => void;
   browserAvailable: boolean; browserActivity: number; terminalActivity: number; toolEvents: PortalEvent[]; sounds: boolean; onSounds: () => void; onCue: (kind: VoiceCue) => void;
   /** Back after a reload, and waiting for a tap before audio may start. */
   waitingForTap?: boolean;
-  microphoneTools?: ReactNode;
   items: Item[]; running: boolean; onStop: () => void;
   /** Pictures waiting to go with the next thing said. */
   attachments: Attachment[]; onAddPictures: (files: File[]) => void; onRemovePicture: (id: string) => void;
@@ -301,7 +303,7 @@ export function VoiceStage({ legacyControls = true, sessionId, folder, workPhase
   const mode: OrbMode = musicPlaying ? "output" : input ? "input" : speaking ? "output" : muted ? "muted" : "idle";
   const orbStyle = useOrbStyle(sessionId);
   const touch = typeof matchMedia === "function" && matchMedia("(hover: none)").matches;
-  const status = waitingForTap ? (touch ? t("Tap to continue voice mode") : t("Click or press a key to continue voice mode")) : starting ? t("Connecting") : input || holding ? t("Hearing you") : speaking ? t("Speaking") : phase === "Speaking" ? t("Preparing your reply") : phase === "Thinking" ? t("Thinking") : phase === "Transcribing" ? t("Transcribing") : muted ? t("Microphone muted") : ptt ? (touch || !bindings["voice.hold"] ? t("Hold the microphone to talk") : t("Hold {keys} to talk", { keys: describe(bindings["voice.hold"], layout) })) : t("Listening");
+  const status = waitingForTap ? (touch ? t("Tap to continue voice mode") : t("Click or press a key to continue voice mode")) : starting ? t("Connecting") : input || holding ? t("Hearing you") : speaking ? (!legacyControls && !muted ? `${t("Speaking")} · ${t("Listening")}` : t("Speaking")) : phase === "Speaking" ? t("Preparing your reply") : phase === "Thinking" ? t("Thinking") : phase === "Transcribing" ? t("Transcribing") : muted ? t("Microphone muted") : ptt ? (touch || !bindings["voice.hold"] ? t("Hold the microphone to talk") : t("Hold {keys} to talk", { keys: describe(bindings["voice.hold"], layout) })) : t("Listening");
   const anyPanel = shown || terminalShown || filesShown || picturesShown || conversation;
   // A window sized by hand keeps its size until the windows are arranged
   // differently — one opens or closes — and then the layout places it again.
@@ -398,6 +400,7 @@ export function VoiceStage({ legacyControls = true, sessionId, folder, workPhase
     <header className="voice-stage-header">
       <span className="voice-stage-session">{title}</span>
       <div className="voice-utilities">
+        <button type="button" onClick={()=>setVoiceLayout('mini')} aria-label={t("Use mini orb in chat")} title={t("Use mini orb in chat")}><LuMinimize2/></button>
         {!conversation && <button type="button" onClick={() => { setConversation(true); onCue("focus"); }} title={`${t("Conversation")}${hint("voice.conversation")}`} aria-label={t("Show the conversation")}><LuMessageSquareText /></button>}
         <button type="button" onClick={onCanvasToggle} title={`${t("Session canvases")}${hint("voice.canvas")}`} aria-label={t("Session canvases")} aria-expanded={canvasOpen}><LuFileText /></button>
         {!filesShown && <button type="button" onClick={openFiles} title={`${t("Show files")}${hint("voice.files")}`} aria-label={t("Show files")}><LuFolderOpen /></button>}
@@ -453,14 +456,15 @@ export function VoiceStage({ legacyControls = true, sessionId, folder, workPhase
       <div className="voice-dock-center">
         {workPhase && (workPhase.label === 'processing the prompt' || workPhase.label === 'compacting the conversation') ? <ActivityProgress phase={workPhase} /> : <>
         <div className="voice-status" role="status"><span />{phase === 'Compacting context' ? t('Compacting context') : thought && anyPanel ? t("Thinking") : status}</div>
+        {acousticStatus&&<small className="text-muted" title="Experimental clarity/reverberation cue; no distance gate is applied.">{acousticStatus}</small>}
         {musicPlaying && (() => { const item = [...items].reverse().find(item => item.kind === "tool" && musicJobId(item.output)); const id = item?.kind === "tool" ? musicJobId(item.output) : undefined; return id ? <MusicPlayer key={id} sessionId={sessionId} jobId={id} compact controlsOnly /> : null; })()}
         {anyPanel && thought && phase !== 'Compacting context' && <div ref={thoughtViewport} className="voice-thought-stream" role="group" aria-label={t("Live model thinking")}>{thought.slice(-1200)}</div>}
         </>}
-      </div>
-      {!anyPanel && transcript && (input || holding || phase === "Transcribing") && <p className="voice-live-transcript" role="group" aria-label={t("Live transcription")}>{transcript}</p>}
+      {!liveTranscript && !anyPanel && transcript && (input || holding || phase === "Transcribing") && <p className="voice-live-transcript" role="group" aria-label={t("Live transcription")}>{transcript}</p>}
       {speaker?.reliable && <p className={`voice-speaker${speaker.matched && speaker.name ? "" : " is-unknown"}`} role="status" aria-label={t("Speaker")}>{speaker.matched && speaker.name ? speaker.name.charAt(0).toUpperCase() + speaker.name.slice(1) : unknownVoices === "enrolled" ? t("Unknown voice, ignored") : t("Unknown voice")}</p>}
 
-      {microphoneTools}
+      <LiveVoiceTranscript value={liveTranscript} />
+      </div>
       <div className="voice-stage-controls">
         {ptt
           ? <button type="button" className={`voice-stage-action voice-hold ${holding ? "is-holding" : ""}`} title={`${t("Hold to talk")}${touch ? "" : hint("voice.hold")}`} aria-label={t("Hold to talk")} aria-pressed={holding} disabled={starting}

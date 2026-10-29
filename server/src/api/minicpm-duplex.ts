@@ -1,9 +1,11 @@
+import { requireAsrEnabled, AsrSettingsError } from "../asr-settings.js";
 import express, { type Router } from "express";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { AccessToken, AgentDispatchClient, RoomServiceClient, TrackSource, ServerError } from "livekit-server-sdk";
 import { nanoid } from "nanoid";
-import { getSession, getVoiceInstructions, getSettings, eventsBefore, eventsSince } from "../db.js";
+import { getSession, chatModel, getVoiceInstructions, getSettings, eventsBefore, eventsSince } from "../db.js";
 import { voiceRulesOn } from "../pi/voice-first.js";
+import { textOf } from "../pi/entries.js";
 import { CLIENT_CONTROL_RULE } from "../pi/client-control-tools.js";
 import { readAgentFile } from "../agent-setup.js";
 import { agentHome } from "../agent-home.js";
@@ -11,15 +13,14 @@ import { CONTEXT_FILES, SHARED_FILES } from "../pi/context-files.js";
 import { understoryOn } from "../features.js";
 import { sessions } from "../session-manager.js";
 
-import { savedServer, resolveKey } from "../providers.js";
 import { config as voiceConfig } from "./voice.js";
 import { readVoice } from "../voice-presets.js";
 import { noteMessage, replyLanguage } from "../pi/reply-language.js";
 import { voiceHeaders } from "../voice-auth.js";
 
-const AGENT_NAME = "yulify-moshi";
+const AGENT_NAME = process.env.YULIFY_VOICE_AGENT_NAME?.trim() || "yulify-microturn";
 const MAX_ACTIVE = 1;
-type ActiveRoom = { noticeSince: number; room: string; dispatchId: string; sessionId: string; bridgeToken: string; createdAt: number; lastSeenAt: number; calls: Map<string, { controller: AbortController; signature: string; promise: Promise<any> }> };
+type ActiveRoom = { spokenThrough: number; backgroundSpeech: boolean; noticeSince: number; room: string; dispatchId: string; sessionId: string; bridgeToken: string; createdAt: number; lastSeenAt: number; calls: Map<string, { controller: AbortController; signature: string; promise: Promise<any> }> };
 const active = new Map<string, ActiveRoom>();
 const completed = new Map<string, { signature: string; result: any; expiresAt: number }>();
 const ROOM_IDLE_TTL_MS = 6 * 60_000; // Worker heartbeat renews live rooms; prune only after six minutes without activity.
@@ -39,15 +40,15 @@ function liveKitConfig() {
   const serverUrl = process.env.LIVEKIT_SERVER_URL?.trim();
   const key = process.env.LIVEKIT_API_KEY?.trim();
   const secret = process.env.LIVEKIT_API_SECRET?.trim();
-  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for PersonaPlex duplex");
+  if (!publicUrl || !serverUrl || !key || !secret) throw new Error("LiveKit is not configured for Yula voice duplex");
   if (!/^wss?:\/\//i.test(publicUrl) || !/^https?:\/\//i.test(serverUrl)) throw new Error("LiveKit public/server URLs use unsupported protocols");
   return { publicUrl, serverUrl, key, secret };
 }
 
-/** Authenticated room issuance for the dedicated PersonaPlex LiveKit voice worker. */
+/** Authenticated room issuance for the dedicated Yula voice LiveKit voice worker. */
 export function minicpmDuplexRouter(): Router {
   const router = express.Router();
-  router.get("/sessions/:id/voice/gemma4/capabilities", async (req, res) => {
+  router.get("/sessions/:id/voice/qwen3/capabilities", async (req, res) => {
     const id = String(req.params.id);
     if (!getSession(id)) return res.status(404).json({ error: "Chat session not found" });
     try {
@@ -56,15 +57,17 @@ export function minicpmDuplexRouter(): Router {
     } catch (error) { return res.status(503).json({ error: (error as Error).message }); }
   });
 
-  router.post("/sessions/:id/voice/gemma4/room", async (req, res) => {
+  router.post("/sessions/:id/voice/qwen3/room", async (req, res) => {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     if (!getSession(sessionId)) return res.status(404).json({ error: { code: "session_not_found", message: "Chat session not found", retryable: false } });
-    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The PersonaPlex voice session is busy. Try again after it closes.", retryable: true } });
+    try { await requireAsrEnabled(); }
+    catch (error) { return res.status(error instanceof AsrSettingsError ? error.status : 503).json({error:{code:'asr_disabled_or_unavailable',message:(error as Error).message,retryable:false}}); }
+    if (starting) return res.status(429).json({ error: { code: "duplex_busy", message: "The Yula voice session is busy. Try again after it closes.", retryable: true } });
     if (sessions.isBusy(sessionId)) return res.status(409).json({ error: { code: "chat_busy", message: "Finish the current Yulify chat operation before starting voice tools.", retryable: true } });
     starting = true;
     try {
-      // Native Gemma audio input with session-authorized tool execution.
+      // Native Qwen audio input with session-authorized tool execution.
       const cfg = liveKitConfig();
       const rooms = new RoomServiceClient(cfg.serverUrl, cfg.key, cfg.secret);
       const dispatches = new AgentDispatchClient(cfg.serverUrl, cfg.key, cfg.secret);
@@ -78,27 +81,27 @@ export function minicpmDuplexRouter(): Router {
         const recentlyCreated = Date.now() - current.createdAt < 30_000;
         const heartbeatFresh = Date.now() - current.lastSeenAt < 90_000;
         if (found.length && (recentlyCreated || (hasAgent && heartbeatFresh))) {
-          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active PersonaPlex voice room. Stop it before reconnecting.", retryable: true } });
+          return res.status(409).json({ error: { code: "duplex_already_active", message: "This chat already has an active Yula voice room. Stop it before reconnecting.", retryable: true } });
         }
         if (found.length) await rooms.deleteRoom(current.room);
         for (const call of current.calls.values()) call.controller.abort(new Error("Stale voice room replaced."));
         active.delete(sessionId);
       }
-      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The PersonaPlex voice session is busy. Try again after it closes.", retryable: true } });
+      if (active.size >= MAX_ACTIVE) return res.status(429).json({ error: { code: "duplex_busy", message: "The Yula voice session is busy. Try again after it closes.", retryable: true } });
       const room = `yulify-${nanoid(20).toLowerCase()}`;
       const identity = `browser-${nanoid(16).toLowerCase()}`;
       await rooms.createRoom({ name: room, emptyTimeout: 60, departureTimeout: 20, maxParticipants: 2 });
       let dispatchId = "";
       try {
         const bridgeToken = randomBytes(32).toString("base64url");
-        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "moshi-duplex-v1", bridgeToken }) });
+        const dispatch = await dispatches.createDispatch(room, AGENT_NAME, { metadata: JSON.stringify({ sessionId, protocol: "qwen36-microturn-voice-v1", bridgeToken }) });
         dispatchId = dispatch.id;
         const token = new AccessToken(cfg.key, cfg.secret, {
           identity,
           name: "Yulify voice",
           ttl: "5m",
-          metadata: JSON.stringify({ sessionId, runtime: "moshi" }),
-          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "moshi" },
+          metadata: JSON.stringify({ sessionId, runtime: "qwen3-omni" }),
+          attributes: { "yulify.session_id": sessionId, "yulify.runtime": "qwen3-omni" },
         });
         token.addGrant({
           roomJoin: true,
@@ -108,7 +111,7 @@ export function minicpmDuplexRouter(): Router {
           canPublishData: true,
         });
         const jwt = await token.toJwt();
-        active.set(sessionId, { noticeSince: eventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1)[0]?.seq ?? 0, room, dispatchId, sessionId, bridgeToken, createdAt: Date.now(), lastSeenAt: Date.now(), calls: new Map() });
+        active.set(sessionId, { spokenThrough: 0, backgroundSpeech: false, noticeSince: eventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1)[0]?.seq ?? 0, room, dispatchId, sessionId, bridgeToken, createdAt: Date.now(), lastSeenAt: Date.now(), calls: new Map() });
         return res.json({ url: cfg.publicUrl, room, identity, token: jwt, expiresInSeconds: 300, capabilities: { audio: true, camera: false, userTranscript: false, tools: true } });
       } catch (error) {
         if (dispatchId) await dispatches.deleteDispatch(dispatchId, room).catch(() => undefined);
@@ -118,13 +121,13 @@ export function minicpmDuplexRouter(): Router {
     } catch (error) {
       const message = (error as Error).message;
       const missingConfig = message.includes("not configured");
-      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "PersonaPlex voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
+      return res.status(missingConfig ? 503 : 502).json({ error: { code: missingConfig ? "duplex_unavailable" : "room_start_failed", message: missingConfig ? message : "Yula voice room could not start. Check LiveKit and worker availability.", retryable: !missingConfig } });
     } finally {
       starting = false;
     }
   });
 
-  router.delete("/sessions/:id/voice/gemma4/room", async (req, res) => {
+  router.delete("/sessions/:id/voice/qwen3/room", async (req, res) => {
     pruneExpiredRooms();
     const sessionId = String(req.params.id);
     const current = active.get(sessionId);
@@ -142,7 +145,7 @@ export function minicpmDuplexRouter(): Router {
       if (active.get(sessionId) === current) active.delete(sessionId);
       return res.json({ ok: true });
     } catch (error) {
-      return res.status(502).json({ error: { code: "room_close_failed", message: "PersonaPlex voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
+      return res.status(502).json({ error: { code: "room_close_failed", message: "Yula voice room could not be fully closed. The room expires automatically after its empty timeout.", retryable: true } });
     }
   });
   return router;
@@ -163,7 +166,7 @@ function authorizedRoom(req: express.Request, sessionId: string): ActiveRoom | u
 /** Worker-only bridge. It is mounted before portal cookie auth, but each request needs its room-scoped random bearer token. */
 export function minicpmDuplexBridgeRouter(): Router {
   const router = express.Router();
-  router.post("/sessions/:id/voice/gemma4/bridge/heartbeat", (req, res) => {
+  router.post("/sessions/:id/voice/qwen3/bridge/heartbeat", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
@@ -171,7 +174,7 @@ export function minicpmDuplexBridgeRouter(): Router {
     return res.json({ ok: true, idle_ttl_seconds: ROOM_IDLE_TTL_MS / 1000 });
   });
 
-  router.get("/sessions/:id/voice/gemma4/bridge/tools", async (req, res) => {
+  router.get("/sessions/:id/voice/qwen3/bridge/tools", async (req, res) => {
     const sessionId = String(req.params.id);
     if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
     try {
@@ -206,7 +209,7 @@ export function minicpmDuplexBridgeRouter(): Router {
     }
   });
 
-  router.post("/sessions/:id/voice/gemma4/bridge/tools/:callId", async (req, res) => {
+  router.post("/sessions/:id/voice/qwen3/bridge/tools/:callId", async (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
@@ -246,59 +249,119 @@ export function minicpmDuplexBridgeRouter(): Router {
     if (!res.headersSent) return res.json(result);
   });
 
-  // Only this room's trusted worker can call the coordinator; provider keys never reach the browser.
-  router.post("/sessions/:id/voice/gemma4/bridge/completion", async (req, res) => {
+  // Only this room's trusted worker can submit speech to Pi.
+  // A transport for the existing Pi session, not a second conversation engine.
+  router.post("/sessions/:id/voice/qwen3/bridge/turn", async (req, res) => {
     const sessionId = String(req.params.id);
-    if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
-    const { messages, purpose } = req.body ?? {};
-    if (!["route", "tools", "summary"].includes(purpose) || !Array.isArray(messages) || messages.length > 96 || Buffer.byteLength(JSON.stringify(messages)) > 256_000)
-      return res.status(400).json({ error: "invalid coordinator request" });
-    const provider = savedServer("forgeloop-provider");
-    if (!provider) return res.status(503).json({ error: "ForgeLoop provider is not configured" });
+    const room = authorizedRoom(req, sessionId);
+    if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
+    const { text, response_id: responseId } = req.body ?? {};
+    if (typeof text !== "string" || !text.trim() || Buffer.byteLength(text) > 16_384 || typeof responseId !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(responseId))
+      return res.status(400).json({ error: "invalid voice turn" });
+    const turnKey = "pi:" + responseId;
+    if ([...room.calls.keys()].some(key => key.startsWith("pi:"))) return res.status(409).json({ error: "A Pi voice turn is still active" });
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 90_000);
-    const abort = () => { if (!res.writableEnded) controller.abort(); };
+    let owned = false, stopped = false, finished = false;
+    res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    const send = (event: Record<string, unknown>) => {
+      if (res.destroyed || res.writableEnded) return;
+      if (res.writableLength > 256_000) { controller.abort(); res.destroy(); return; }
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const abort = () => { if (!finished) controller.abort(); };
+    const cancelOwned = () => { if (owned && !finished) void sessions.abort(sessionId).catch(() => {}); };
+    controller.signal.addEventListener("abort", cancelOwned, { once: true });
     res.once("close", abort);
-    try {
-      let model = process.env.YULIFY_DUPLEX_ROUTER_MODEL;
-      if (!model) {
-        const status = await fetch("http://127.0.0.1:10105/router/status", { signal: controller.signal });
-        if (!status.ok) throw new Error("Strata model status unavailable");
-        model = (await status.json() as any).current;
+    const heartbeat = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(": heartbeat\n\n"); }, 10_000);
+    const promise = (async () => {
+      try {
+        await sessions.ask(sessionId, text.trim(), {
+          voice: true, signal: controller.signal, streamText: false, timeoutMs: 15 * 60_000,
+          beforeTurn: () => {
+            if (controller.signal.aborted || active.get(sessionId) !== room) throw new Error("Voice turn cancelled before dispatch");
+            owned = true;
+            send({ type: "turn.started", response_id: responseId });
+          },
+          onTextDelta: delta => send({ type: "text.delta", delta }),
+          onMessageEnd: (text, seq) => {
+            if (Number.isSafeInteger(seq)) room.spokenThrough = Math.max(room.spokenThrough, seq!);
+            send({ type: "message.done", text });
+          },
+          onReply: line => { if (line.startsWith("⚙")) send({ type: "tool.status", text: line }); },
+          onStopped: () => { stopped = true; },
+        });
+        send({ type: "turn.done", stopped });
+      } catch (error) {
+        send({ type: "turn.error", message: controller.signal.aborted ? "Voice turn cancelled" : (error as Error).message });
+      } finally {
+        finished = true; clearInterval(heartbeat); res.off("close", abort);
+        controller.signal.removeEventListener("abort", cancelOwned);
+        room.calls.delete(turnKey);
+        if (!res.destroyed && !res.writableEnded) res.end();
       }
-      if (!model) throw new Error("No Strata model is ready");
-      const schemas = purpose === "tools" ? await sessions.duplexToolSchemas(sessionId) : [];
-      const key = resolveKey(provider.key);
-      const upstream = await fetch(provider.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
-        method: "POST", signal: controller.signal,
-        headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
-        body: JSON.stringify({ model, messages, stream: false, temperature: purpose === "route" ? 0 : 0.3,
-          max_tokens: purpose === "route" ? 256 : 2048, chat_template_kwargs: { enable_thinking: false },
-          ...(schemas.length ? { tools: schemas.map(tool => ({ type: "function", function: tool })), tool_choice: "auto" } : {}),
-        }),
-      });
-      if (!upstream.ok) throw new Error(`Strata coordinator returned HTTP ${upstream.status}`);
-      const result = await upstream.json() as any;
-      if (!result.choices?.[0]?.message) throw new Error("Strata returned no coordinator message");
-      return res.json({ message: result.choices[0].message, model });
-    } catch (error) { if (!res.headersSent) return res.status(502).json({ error: (error as Error).message }); }
-    finally { clearTimeout(timer); res.off("close", abort); }
+    })();
+    room.calls.set(turnKey, { controller, signature: text, promise });
   });
 
-  router.get("/sessions/:id/voice/gemma4/bridge/notifications", (req, res) => {
+  router.post("/sessions/:id/voice/qwen3/bridge/interrupt", async (req, res) => {
+    const room = authorizedRoom(req, String(req.params.id));
+    if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
+    const turns = [...room.calls.entries()].filter(([key]) => key.startsWith("pi:")).map(([, call]) => call);
+    for (const turn of turns) turn.controller.abort();
+    // A replacement turn cannot race the old Pi turn's final settlement.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.allSettled(turns.map(turn => turn.promise)), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Previous Pi turn is still stopping")), 8000);
+      })]);
+      return res.json({ ok: true });
+    } catch (error) { return res.status(409).json({ error: (error as Error).message }); }
+    finally { if (timer) clearTimeout(timer); }
+  });
+
+  // Old split-model inference must not be revived by a stale worker.
+  router.post("/sessions/:id/voice/qwen3/bridge/completion", (req, res) => {
+    if (!authorizedRoom(req, String(req.params.id))) return res.status(401).json({ error: "invalid voice bridge credential" });
+    return res.status(410).json({ error: "Use the shared Pi voice turn stream" });
+  });
+
+  router.get("/sessions/:id/voice/qwen3/bridge/notifications", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
     const after = Number(req.query.after);
     const cursor = Number.isSafeInteger(after) ? Math.max(after, room.noticeSince) : room.noticeSince;
     const rows = eventsSince(sessionId, cursor, 100);
-    const notifications = rows.filter(row => row.type === "portal_music_ready").map(row => ({ seq: row.seq, ...JSON.parse(row.payload) }));
+    const notifications: Array<{seq: number; text: string; kind: string}> = [];
+    for (const row of rows) {
+      let payload: any;
+      try { payload = JSON.parse(row.payload); } catch { continue; }
+      const message = payload?.message;
+      // Only spoken background-result turns may be replayed here. Ordinary typed
+      // conversation, tool output and thinking never enter the playback queue.
+      if ((row.type === "message_start" || row.type === "message_end") && message?.role === "user") {
+        const prompt = textOf(message.content).trimStart();
+        room.backgroundSpeech = /^\[Audio mode\]\s*<background-result\b/.test(prompt);
+      }
+      if (row.type === "portal_music_ready" && typeof payload?.text === "string") {
+        notifications.push({seq: row.seq, text: payload.text, kind: "music"});
+      } else if (row.type === "message_end" && message?.role === "assistant"
+          && room.backgroundSpeech && row.seq > room.spokenThrough) {
+        const text = textOf(message.content).trim();
+        if (text && message.stopReason !== "aborted" && message.stopReason !== "error")
+          notifications.push({seq: row.seq, text: text.slice(0, 16000), kind: "background_reply"});
+      }
+      if (row.type === "agent_settled") room.backgroundSpeech = false;
+    }
     return res.json({ cursor: rows.at(-1)?.seq ?? cursor, notifications });
   });
 
-  router.get("/sessions/:id/voice/gemma4/bridge/config", (req, res) => {
+  router.get("/sessions/:id/voice/qwen3/bridge/config", async (req, res) => {
     const sessionId = String(req.params.id);
     if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
+    try { await sessions.client(sessionId); }
+    catch (error) { return res.status(503).json({ error: (error as Error).message }); }
     const level = getSession(sessionId)?.thinking_level || getSettings().thinkingLevel || "off";
     const voice = voiceConfig();
     let name = voice.voice;
@@ -307,7 +370,7 @@ export function minicpmDuplexBridgeRouter(): Router {
     return res.json({ thinking_enabled: level !== "off" && level !== "none", tts });
   });
 
-  router.post("/sessions/:id/voice/gemma4/bridge/events", async (req, res) => {
+  router.post("/sessions/:id/voice/qwen3/bridge/events", async (req, res) => {
     const sessionId = String(req.params.id);
     if (!authorizedRoom(req, sessionId)) return res.status(401).json({ error: "invalid voice bridge credential" });
     const { response_id: responseId, type, text } = req.body ?? {};
@@ -317,18 +380,18 @@ export function minicpmDuplexBridgeRouter(): Router {
       const url = voiceConfig().breezeUrl.replace(/\/v1\/audio\/speech\/?$/, "/v1/normalize");
       await noteMessage(sessionId, text, url, (input, init) => fetch(input, { ...init, headers: String(input) === url ? { ...init?.headers, ...voiceHeaders() } : init?.headers }));
     }
-    const recorded = type === "user.final" ? sessions.recordDuplexUser(sessionId, responseId, text) : sessions.recordDuplexAssistant(sessionId, responseId, text);
+    const recorded = type === "user.final" ? sessions.recordDuplexUser(sessionId, responseId, text) : sessions.recordDuplexAssistant(sessionId, responseId, text, await sessions.currentModel(sessionId));
     return res.json({ ok: true, recorded });
   });
 
-  router.delete("/sessions/:id/voice/gemma4/bridge/tools/:callId", (req, res) => {
+  router.delete("/sessions/:id/voice/qwen3/bridge/tools/:callId", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });
     room.calls.get(String(req.params.callId))?.controller.abort(new Error("Tool call cancelled by duplex worker."));
     return res.json({ ok: true });
   });
-  router.delete("/sessions/:id/voice/gemma4/bridge/tools", (req, res) => {
+  router.delete("/sessions/:id/voice/qwen3/bridge/tools", (req, res) => {
     const sessionId = String(req.params.id);
     const room = authorizedRoom(req, sessionId);
     if (!room) return res.status(401).json({ error: "invalid voice bridge credential" });

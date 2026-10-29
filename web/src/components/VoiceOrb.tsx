@@ -764,14 +764,15 @@ export function VoiceOrb({ mode, levels, look }: { mode: OrbState; levels: Mutab
       const mode = current.current;
       const look = style.current;
       const motion = ORB_PERSONALITIES[look.personality];
-      const value = (mode === "input" ? levels.current.input : mode === "output" ? levels.current.output : 0) * look.reactivity;
+      const signal = mode === "input" ? levels.current.input : mode === "output" ? levels.current.output : 0;
+      const value = Number.isFinite(signal) ? Math.max(0, Math.min(1, signal * look.reactivity)) : 0;
       level += (value - level) * (value > level ? motion.attack : motion.release);
       const target = hexToRgb(look.colors[mode]);
       color = color.map((v, i) => v + (target[i] - v) * 0.06);
       const rgb = color.map(Math.round).join(",");
       const t = reduced ? 0 : timestamp * 0.00055 * look.speed * motion.drift;
       const swell = 1 + motion.bounce * Math.sin(t * 3);
-      const r = (132 + level * (reduced ? 5 : 28)) * swell;
+      const r = (108 + level * (reduced ? 2 : 9)) * swell;
       // Where the face looks: about while idle, up toward you while listening.
       const ease = reduced ? 1 : 0.1;
       lid += ((mode === "muted" ? 0 : 1) - lid) * ease;
@@ -794,14 +795,48 @@ export function VoiceOrb({ mode, levels, look }: { mode: OrbState; levels: Mutab
       floor.addColorStop(0, "rgba(0,0,0,0.5)"); floor.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = floor; ctx.beginPath(); ctx.arc(0, 0, r * 0.8, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
-      for (let ring = 0; ring < motion.rings; ring++) {
-        ctx.beginPath();
-        ctx.ellipse(0, 0, r + 20 + ring * 16 + level * 7, r + 18 + ring * 16, Math.sin(t) * motion.wobble, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(${rgb},${Math.max(0.04, 0.2 + level * 0.15 - ring * 0.05)})`; ctx.lineWidth = 1.2; ctx.stroke();
+      // Instrument-like orbital tracks; the voice meter changes their energy, not their geometry.
+      ctx.save();
+      for (let ring = 0; ring < 3; ring++) {
+        const radius = r + 22 + ring * 17;
+        const rotation = t * (ring % 2 ? -0.4 : 0.3) + ring * 1.8;
+        ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${rgb},${0.09 + level * 0.08})`; ctx.lineWidth = 0.8; ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, 0, radius, rotation, rotation + Math.PI * (ring === 1 ? 0.7 : 0.4));
+        ctx.strokeStyle = `rgba(${rgb},${0.62 + level * 0.25})`; ctx.lineWidth = ring === 0 ? 1.8 : 1.1; ctx.lineCap = "round"; ctx.stroke();
       }
+      // Three flowing contours respond to the real input/output amplitude envelope.
+      // These are a voice-level visualization, not a frequency spectrum.
+      const energy = mode === "muted" ? 0 : level;
+      for (let band = 0; band < 3; band++) {
+        ctx.beginPath();
+        for (let i = 0; i <= 192; i++) {
+          const a = i / 192 * Math.PI * 2;
+          const wave = Math.sin(a * 7 + t * 5.5 + band * 1.2) * 0.5
+            + Math.sin(a * 11 - t * 4 + band * 0.8) * 0.3
+            + Math.sin(a * 17 + t * 7) * 0.2;
+          const amplitude = reduced ? energy * 2 : 0.7 + energy * (18 + band * 4);
+          const radius = r + 18 + band * 11 + wave * amplitude;
+          const x = Math.cos(a) * radius, y = Math.sin(a) * radius;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath(); ctx.lineWidth = band === 0 ? 1.5 : 0.9;
+        ctx.strokeStyle = `rgba(${rgb},${(0.14 + energy * 0.55) * (1 - band * 0.18)})`;
+        ctx.stroke();
+      }
+      for (let i = 0; i < 64; i++) {
+        const a = i * Math.PI / 32, radius = r + 66;
+        ctx.beginPath(); ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
+        ctx.lineTo(Math.cos(a) * (radius + (i % 8 === 0 ? 5 : 2) + energy * (reduced ? 2 : 15) * (0.5 + 0.5 * Math.sin(a * 9 + t * 6))), Math.sin(a) * (radius + (i % 8 === 0 ? 5 : 2) + energy * (reduced ? 2 : 15) * (0.5 + 0.5 * Math.sin(a * 9 + t * 6))));
+        ctx.strokeStyle = `rgba(${rgb},${i % 8 === 0 ? 0.55 : 0.22})`; ctx.lineWidth = 1; ctx.stroke();
+      }
+      const beacon = t * 0.3 - Math.PI / 2;
+      ctx.beginPath(); ctx.arc(Math.cos(beacon) * (r + 56), Math.sin(beacon) * (r + 56), 2.4, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(218,255,255,.95)"; ctx.shadowColor = `rgba(${rgb},.8)`; ctx.shadowBlur = 9; ctx.fill();
+      ctx.restore();
       const [first, second] = motion.lobes;
       // How far the edge is from the middle at an angle: the outline the sphere is filled, clipped and feathered by.
-      const edge = (a: number) => r + (Math.sin(a * first + t * 1.3) * (3 + level * 7) + Math.sin(a * second - t * 2) * level * 10) * motion.wave;
+      const edge = (a: number) => r + (Math.sin(a * first + t * 1.3) + Math.sin(a * second - t * 2) * level) * motion.wave * 0.6;
       const outline = new Path2D();
       for (let i = 0; i <= 160; i++) {
         const a = i / 160 * Math.PI * 2, e = edge(a);
@@ -810,8 +845,8 @@ export function VoiceOrb({ mode, levels, look }: { mode: OrbState; levels: Mutab
       }
       outline.closePath();
       const sphere = ctx.createRadialGradient(-r * 0.32, -r * 0.45, 1, r * 0.12, r * 0.1, r * 1.32);
-      sphere.addColorStop(0, `rgba(${rgb},0.98)`); sphere.addColorStop(0.32, `rgba(${rgb},0.95)`);
-      sphere.addColorStop(0.7, `rgb(${color.map(v => Math.round(v * 0.62)).join(",")})`); sphere.addColorStop(1, `rgb(${color.map(v => Math.round(v * 0.34)).join(",")})`);
+      sphere.addColorStop(0, "rgba(218,255,255,.98)"); sphere.addColorStop(0.18, `rgba(${rgb},0.8)`); sphere.addColorStop(0.38, `rgba(${rgb},0.48)`);
+      sphere.addColorStop(0.7, `rgb(${color.map(v => Math.round(v * 0.23)).join(",")})`); sphere.addColorStop(1, `rgb(${color.map(v => Math.round(v * 0.06)).join(",")})`);
       ctx.shadowColor = `rgba(${rgb},0.65)`; ctx.shadowBlur = 22 * look.glow;
       ctx.fillStyle = sphere; ctx.fill(outline); ctx.shadowBlur = 0;
       const plush = look.finish === "plush";
@@ -830,6 +865,14 @@ export function VoiceOrb({ mode, levels, look }: { mode: OrbState; levels: Mutab
       core.addColorStop(0, `rgba(${color.map((v) => Math.round(v + (255 - v) * 0.55)).join(",")},${0.3 + level * 0.25})`); core.addColorStop(1, `rgba(${rgb},0)`);
       ctx.fillStyle = core; ctx.fillRect(-r, -r, 2 * r, 2 * r);
       drawPattern(ctx, look.pattern, false, r, t, level, tint, turn, sparkles);
+      if (look.finish !== "plush") {
+        ctx.save(); ctx.rotate(-0.55 + Math.sin(t * 0.3) * 0.15);
+        for (let i = 1; i < 6; i++) {
+          ctx.beginPath(); ctx.ellipse(-r * 0.08, -r * 0.08, r * i / 5.5, r * i / 8, 0, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${rgb},${0.18 + level * 0.1})`; ctx.lineWidth = 0.8; ctx.stroke();
+        }
+        ctx.restore();
+      }
       // Felt goes on before the shading, so the shadow side darkens it as it does the surface under it.
       if (plush) {
         // The pile over the whole body, scaled with the orb and riding a little with the turn.

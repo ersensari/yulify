@@ -10,3 +10,5 @@ import "./styles/preview.css";
 import "./styles/motion.css";
 import "./styles/viewer.css";
 import "./styles/gallery.css";
+
+import "./styles/holographic.css";

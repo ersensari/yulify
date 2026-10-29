@@ -1,3 +1,4 @@
+import { asrSettings, AsrSettingsError, requireAsrEnabled } from "../asr-settings.js";
 import { replyLanguage } from "../pi/reply-language.js";
 import { addVoice, listVoices, readVoice, updateVoice, deleteVoice, VoiceNotFound } from '../voice-presets.js';
 import { spokenNumbers } from '../voice-numbers.js';
@@ -354,6 +355,19 @@ export function disconnectManagedVoice() {
 }
 export function voiceRouter(): Router {
   const router = express.Router();
+  router.get('/voice/asr-settings', async (_req, res) => {
+    try { res.set('Cache-Control','no-store').json(await asrSettings()); }
+    catch (error) { res.status(error instanceof AsrSettingsError ? error.status : 502).json({ error: (error as Error).message }); }
+  });
+  router.put('/voice/asr-settings', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({error:'Speech recognition settings must be an object'});
+    try {
+      const result=await asrSettings(req.body);
+      // Existing browser dictation peers must stop too when recognition is off.
+      if (!result.settings.enabled) { for (const peer of rtc.values()) peer.close(); rtc.clear(); }
+      res.json(result);
+    } catch (error) { res.status(error instanceof AsrSettingsError ? error.status : 502).json({ error: (error as Error).message }); }
+  });
   // The stored GPU choice, in place before anything asks the service to start.
   voiceService.useGpu(getSetting('voice_gpu') ?? '');
   /** Choose the GPU by UUID, or "" to leave it to VOICE_GPU and then the card with the most room. A running voice moves now; a stopped one on its next start. */
@@ -461,6 +475,8 @@ export function voiceRouter(): Router {
     } catch(e){res.status(503).json({error:(e as Error).message});}
   });
   router.post("/sessions/:id/voice/transcribe", express.raw({ type: "audio/wav", limit: "12mb" }), async (req, res) => {
+    try { await requireAsrEnabled(); }
+    catch (error) { return res.status(error instanceof AsrSettingsError ? error.status : 503).json({error:(error as Error).message}); }
     if (!Buffer.isBuffer(req.body) || req.body.length < 44 || req.body.toString("ascii", 0, 4) !== "RIFF")
       return res.status(400).json({ error: "A WAV recording is required" });
     const settings = config();
@@ -479,7 +495,7 @@ export function voiceRouter(): Router {
     try {
       const sttStarted=performance.now();
       // Who is talking is asked while Whisper works (opt-in VOICE_SPEAKER_ID + SPEECH_URL); it never fails the request.
-      const idUrl = speakerIdUrl();
+      const idUrl = (await requireAsrEnabled()).settings.speaker_verification_enabled ? speakerIdUrl() : undefined;
       const speakerP = idUrl ? speakerIdentify(idUrl)(req.body, controller.signal) : undefined;
       const upstream = await fetch(settings.whisperUrl, { method: "POST", body: form, headers: voiceHeaders(), redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]) });
       if (!upstream.ok) throw new Error(`Whisper returned HTTP ${upstream.status}`);
@@ -487,6 +503,7 @@ export function voiceRouter(): Router {
       if (typeof result.text !== "string") throw new Error("Whisper returned no transcript");
       res.set("Server-Timing", `whisper_upstream;dur=${(performance.now()-sttStarted).toFixed(1)}`);
       const speaker = await speakerP;
+      await requireAsrEnabled();
       res.json({ text: result.text.trim(), ...(speaker ? { speaker } : {}) });
     } catch (e) { if (!res.destroyed) res.status(502).json({ error: (e as Error).message }); }
   });
@@ -496,6 +513,8 @@ export function voiceRouter(): Router {
   // ports, VOICE_RTC_ADDRESSES for an address that is not on an interface), only this signalling goes through the proxy.
   const rtc = new Map<string, RtcStt>();
   router.post("/sessions/:id/voice/rtc", express.json({ limit: "64kb" }), async (req, res) => {
+    try { await requireAsrEnabled(); }
+    catch (error) { return res.status(error instanceof AsrSettingsError ? error.status : 503).json({error:(error as Error).message}); }
     const offer = req.body?.sdp;
     if (req.body?.type !== "offer" || typeof offer !== "string" || offer.length > 32768) return res.status(400).json({ error: "An SDP offer is required" });
     const id = String(req.params.id);
@@ -506,7 +525,14 @@ export function voiceRouter(): Router {
       rtc.get(id)?.close();
       let peer: RtcStt | undefined;
       peer = await answerOffer(offer, {
-        transcribe: whisperTranscribe(settings.whisperUrl, settings.sttModel || undefined, 120000, speakerIdUrl() ? speakerIdentify(speakerIdUrl()!) : undefined),
+        transcribe: async (...args) => {
+          const current=await requireAsrEnabled();
+          const identify=current.settings.speaker_verification_enabled && speakerIdUrl() ? speakerIdentify(speakerIdUrl()!) : undefined;
+          const result=await whisperTranscribe(settings.whisperUrl, settings.sttModel || undefined, 120000, identify)(...args);
+          const after=await requireAsrEnabled();
+          if (!after.settings.speaker_verification_enabled) delete result.speaker;
+          return result;
+        },
         // The chat's own language setting, where it is one; and the languages that count as speech where VOICE_STT_LANGUAGES lists them (en,tr).
         ...(settings.language && settings.language !== "auto" ? { language: settings.language } : {}),
         languages: (process.env.VOICE_STT_LANGUAGES ?? "").split(",").map(l => l.trim().toLowerCase()).filter(Boolean),
@@ -532,9 +558,8 @@ export function voiceRouter(): Router {
     const speechStarted=performance.now();
     let busyMs=0;
     const text = req.body?.text;
-    // Merged sentences (MERGE_MAX_CHARS) and whole songs ("[style: Song: ...]", web/src/voice.ts) go to the audio-cpp engine in
-    // one request of up to 2000 characters; the other engines are sent single phrases of at most 600.
-    const maxChars = config().runtime === "audio-cpp" || (typeof text === "string" && /\[\s*style\s*:\s*song\b/i.test(text)) ? 2000 : 600;
+    // Merged speech phrases on audio-cpp go in up to 2000 characters; music has its own MCP player path.
+    const maxChars = config().runtime === "audio-cpp" ? 2000 : 600;
     if (typeof text !== "string" || !text.trim() || text.length > maxChars)
       return res.status(400).json({ error: `Speech text must contain 1–${maxChars} characters` });
     // The voice of the agent the chat is with, where it has one of its own: the
@@ -620,8 +645,7 @@ export function voiceRouter(): Router {
           form.set("ref_text", reference.transcript);
         }
       }
-      const songRequest = /\[\s*style\s*:\s*song\b/i.test(text);
-      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(songRequest ? 15 * 60_000 : 120000)]);
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]);
       let upstream: Response;
       // Cancellation may leave Breeze finishing its current GPU operation.
       // Keep one browser request pending instead of exposing normal contention.

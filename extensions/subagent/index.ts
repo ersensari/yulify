@@ -171,6 +171,7 @@ export default function (pi: any) {
   // Read once, as it is loaded: what the tool tells the model and what it
   // does must agree. A change reaches a chat when it is reloaded.
   const mode = subagentMode();
+  pi.events.on("subagent:v1:guard-support", (event: any) => event?.reply?.(1));
   // Background children still running, stopped with the session that started them.
   const detached = new Set<Run>();
   // Set once the session is over: what still waits for a slot does not start.
@@ -197,11 +198,17 @@ export default function (pi: any) {
   function start(task: string, label: string, toolCallId: string, ctx: any, background: boolean, onUpdate?: any, announced?: string): Run {
     const id = announced ?? randomUUID();
     const model = childModel(chatChoice(), ctx?.model);
+    let policy: any;
+    pi.events.emit("subagent:v1:guard-policy", { reply: (value: any) => { policy = value; } });
+    if (policy?.version !== 1 || typeof policy.extension !== "string") {
+      throw new Error("Subagent guard policy is unavailable; refusing an unprotected child");
+    }
+    const readyCommand = `yulify-guard-${randomUUID()}`;
     // Its stderr goes nowhere: a pipe nobody reads fills, and the child
     // blocks on its next warning for good.
-    const child = spawn(process.env.PI_SUBAGENT_BIN || "pi", ["--mode", "rpc", "--no-session", ...(model ? ["--provider", model.provider, "--model", model.id] : [])], {
+    const child = spawn(process.env.PI_SUBAGENT_BIN || "pi", ["--mode", "rpc", "--no-session", "--extension", policy.extension, ...(model ? ["--provider", model.provider, "--model", model.id] : [])], {
       cwd: ctx.cwd,
-      env: { ...process.env, [CHILD_ENV]: "1" },
+      env: { ...process.env, [CHILD_ENV]: "1", YULIFY_SUBAGENT_GUARD: JSON.stringify({ ...policy, readyCommand }) },
       stdio: ["pipe", "pipe", "ignore"],
     });
     // A child that died, or never started, closes the pipe under the next
@@ -218,12 +225,13 @@ export default function (pi: any) {
     // Stopped by the person in the portal, or by the parent's own stop: either
     // way what it has is not its whole answer.
     let stopped = false;
+    let guardReady = false;
     const stop = () => {
       stopped = true;
       send({ type: "abort" });
     };
     const off = [
-      pi.events.on(INPUT, (d: any) => d?.id === id && typeof d.text === "string" && send({ type: "steer", message: d.text })),
+      pi.events.on(INPUT, (d: any) => d?.id === id && guardReady && typeof d.text === "string" && send({ type: "steer", message: d.text })),
       pi.events.on(STOP, (d: any) => d?.id === id && stop()),
     ];
     pi.events.emit(START, {
@@ -237,12 +245,29 @@ export default function (pi: any) {
     });
 
     const status = new Promise<Status>((resolve) => {
+      const guardDeadline = setTimeout(() => {
+        failure = "Subagent guard readiness timed out; no task was sent";
+        resolve("error");
+      }, 30_000);
+      guardDeadline.unref?.();
+      child.once("exit", () => clearTimeout(guardDeadline));
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         let event: any;
         try {
           event = JSON.parse(line);
         } catch {
+          return;
+        }
+        if (event.type === "response" && event.id === "guard-ready") {
+          clearTimeout(guardDeadline);
+          if (!event.success || !event.data?.commands?.some((c: any) => c.name === readyCommand)) {
+            failure = "Inherited subagent guard did not load; no task was sent";
+            resolve("error");
+          } else if (!guardReady && !stopped) {
+            guardReady = true;
+            send({ type: "prompt", message: task });
+          } else if (stopped) resolve("stopped");
           return;
         }
         // The task refused — no model, no key: no run follows, so nothing
@@ -270,7 +295,7 @@ export default function (pi: any) {
       });
       child.on("exit", (code) => resolve(stopped ? "stopped" : code === 0 ? "done" : "error"));
       child.on("error", () => resolve("error"));
-      send({ type: "prompt", message: task });
+      send({ id: "guard-ready", type: "get_commands" });
     });
 
     const finished = status.then((status) => {

@@ -1,3 +1,4 @@
+import { onDesktopAction } from "./desktop";
 import { handleClientControl } from "./client-controls";
 import { LuMenu, LuX } from "react-icons/lu";
 import { appendLiveEvents, resetLiveEvents } from "./live-events";
@@ -261,6 +262,16 @@ function Shell({
     setMobileNav(false);
     navigate(`/s/${s.id}`);
   });
+  const onOpenSettings = useStable(() => navigate(sessionId ? `/s/${sessionId}/settings/general` : "/settings/general"));
+
+  useEffect(() => onDesktopAction(action => {
+    if (action === 'open-settings') return onOpenSettings();
+    if (!['start-voice','toggle-voice'].includes(action) || window.location.pathname.includes('/s/')) return;
+    void api.createSession().then(async s => {
+      window.sessionStorage.setItem('yulify:desktop-start-voice',s.id);
+      await refreshSessions();navigate(`/s/${s.id}`);
+    }).catch(e=>setError(String(e.message||e)));
+  }),[refreshSessions,navigate,onOpenSettings]);
 
   useEffect(() => {
     api
@@ -651,7 +662,6 @@ function Shell({
     await api.pinSession(id, pinned);
     refreshSessions();
   });
-  const onOpenSettings = useStable(() => navigate(sessionId ? `/s/${sessionId}/settings/general` : "/settings/general"));
   const closeSettings = useStable(() => navigate(active ? `/s/${active.id}` : "/"));
   const setUpModel = useStable(() => {
     navigate(active ? `/s/${active.id}` : "/");

@@ -1,11 +1,15 @@
+import { registerVoiceText } from '../voice-text';
+import { api } from "../api";
+import { reduceLiveTranscript, type LiveVoiceTranscript } from "../live-voice-transcript";
 import { useEffect, useRef, useState } from "react";
 import { LuLoaderCircle, LuMic, LuMicOff } from "react-icons/lu";
 import { MiniCpmDuplexRoom, type DuplexRoomState } from "../minicpm-duplex-room";
 import { t } from "../i18n";
 import { session } from "../safe-storage";
 
-/** Explicit opt-in transport control; the existing sequential voice button remains the rollback path. */
-export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onError }: { sessionId: string; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onError?: (message: string) => void }) {
+/** Transport lifecycle for the standard voice control. May render headlessly. */
+export function MiniCpmDuplexControl({ sessionId, headless = false, disabled = false, onModeChange, onStatus, onMuteControl, onMutedChange, onInputLevel, onCaptureStatus, onReconnectControl, onActivity, onToggleControl, onLiveTranscript, onAcoustics, onError }: { sessionId: string; headless?: boolean; disabled?: boolean; onModeChange?: (active: boolean) => void; onStatus?: (state: DuplexRoomState, caption: string) => void; onMuteControl?: (control: (() => void) | null) => void; onMutedChange?: (muted: boolean) => void; onInputLevel?: (level: number) => void; onCaptureStatus?: (status: {label: string; level: number; muted: boolean}) => void; onReconnectControl?: (fn: (() => Promise<void>) | null) => void; onActivity?: (activity: string) => void; onToggleControl?: (toggle: (() => void) | null) => void; onLiveTranscript?: (value: LiveVoiceTranscript | undefined) => void; onAcoustics?: (status:string)=>void; onError?: (message: string) => void }) {
+  const liveTranscript = useRef<LiveVoiceTranscript>();
   const room = useRef<MiniCpmDuplexRoom>();
   const attemptId = useRef(0);
   const release = useRef<(() => void) | undefined>();
@@ -21,6 +25,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   const busy = state === "connecting" || state === "reconnecting";
 
   const stop = async () => {
+    liveTranscript.current = undefined; onLiveTranscript?.(undefined);
     attemptId.current++;
     release.current?.(); release.current = undefined;
     if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
@@ -33,16 +38,32 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
 
   const start = () => {
     if (room.current || disabled) return;
+    liveTranscript.current = undefined; onLiveTranscript?.(undefined);
     setMessage(""); onError?.("");
     setCaption(""); captionRef.current = "";
-    setToolActivity("");
+    setToolActivity(""); onAcoustics?.("");
     const run = async () => {
       const attempt = ++attemptId.current;
       try {
         const client = new MiniCpmDuplexRoom(sessionId, {
           state: (next, detail) => { setState(next); onStatus?.(next, caption); if (detail) setMessage(detail); },
           event: event => {
+            if (event.type === "voice.transcript" || event.type === "voice.transcript.reset") {
+              liveTranscript.current = reduceLiveTranscript(liveTranscript.current, event);
+              onLiveTranscript?.(liveTranscript.current);
+            }
             if (event.type === "voice.activity" && typeof event.activity === "string") onActivity?.(event.activity);
+            if (event.type === "voice.speaker") {
+              if (event.verification_enabled === false) setToolActivity("Transcribing audio · speaker verification off");
+              else if (event.matched === true) setToolActivity("Transcribing audio…");
+              else if (event.reason !== "silence_or_short_audio") setToolActivity("Speaker verification failed");
+            }
+            if(event.type==='voice.acoustics') {
+              const status=muted.current||musicPaused.current?'paused':String(event.status||'unavailable');
+              const hint=event.hint==='near_like'?'Near-like':event.hint==='far_like'?'Reverberant / far-like':'Uncertain proximity';
+              onAcoustics?.(status==='measured'?`${hint} · experimental`:status==='warming_up'?'Acoustics warming up…':status==='no_speech'?'Acoustics: waiting for speech':status==='paused'?'Acoustics paused':'Acoustic analysis unavailable');
+            }
+            if (event.type === "voice.addressing") setToolActivity(event.addressed === true ? "" : "Waiting for speech directed at the assistant…");
             if (event.type === "response.started") { setMessage(""); setToolActivity(""); onError?.(""); }
             if (event.type === "user.transcript.final" && typeof event.text === "string" && !responseId.current.startsWith(`${String(event.response_id)}-`)) {
               captionRef.current = event.text; setCaption(event.text); onStatus?.("connected", event.text);
@@ -64,11 +85,11 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
               const nextCaption = id && id !== responseId.current ? event.text : captionRef.current + event.text;
               if (id) responseId.current = id;
               captionRef.current = nextCaption; setCaption(nextCaption); onStatus?.("connected", nextCaption);
-            } else if (event.type === "tool.status" && typeof event.name === "string") setToolActivity(event.name === "ask_strata" ? "Ayrıntılı görev üzerinde çalışılıyor…" : event.name.startsWith("music_") ? "Müzik isteği işleniyor…" : event.name.includes("search") ? "Araştırılıyor…" : "İsteğin işleniyor…");
-            else if (event.type === "tool.result" && typeof event.name === "string") setToolActivity(event.status === "success" ? "" : "İşlem tamamlanamadı.");
+            } else if (event.type === "tool.status" && typeof event.name === "string") setToolActivity(event.name === "ask_strata" ? "Working on the detailed task…" : event.name.startsWith("music_") ? "Processing the music request…" : event.name.includes("search") ? "Searching…" : "Processing your request…");
+            else if (event.type === "tool.result" && typeof event.name === "string") setToolActivity(event.status === "success" ? "" : "The operation could not be completed.");
             else if (event.type === "session.error" && typeof event.message === "string") {
               setMessage(event.message); onError?.(event.message);
-              if (["duplex_failed", "minicpm_disconnected", "resource_busy", "audio_overflow", "engine_backpressure"].includes(String(event.code))) void stop();
+              if (["duplex_failed", "minicpm_disconnected", "resource_busy", "audio_overflow", "engine_backpressure", "asr_settings_changed"].includes(String(event.code))) void stop();
             }
           },
         });
@@ -96,7 +117,7 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
         if (session.get("voiceActive") === sessionId) session.remove("voiceActive");
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
         onModeChange?.(false); onMuteControl?.(null); onReconnectControl?.(null);
-        setMessage((error as Error).message);
+        setMessage((error as Error).message); onError?.((error as Error).message);
         setState("error");
       }
     };
@@ -120,7 +141,25 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
   });
 
   useEffect(() => {
-    const end = (event: Event) => { if ((event as CustomEvent).detail?.sessionId === sessionId && session.get("voiceActive") === sessionId) void stop(); };
+    const changed=() => { if (room.current) void stop(); };
+    const check=() => { if (room.current) void api.asrSettings().then(value => {
+      if (!value.settings.enabled) { setMessage("Speech recognition is disabled in Settings > Voice."); void stop(); }
+    }).catch(() => { /* transport reports its own connection failure */ }); };
+    window.addEventListener("yulify:asr-settings-changed",changed);
+    const timer=window.setInterval(check,10000);
+    return () => { window.removeEventListener("yulify:asr-settings-changed",changed); window.clearInterval(timer); };
+  }, [sessionId]);
+
+  useEffect(()=>registerVoiceText(sessionId,text=>{const client=room.current;if(!client)return Promise.reject(new Error('Voice is not connected.'));return client.sendText(text);}),[sessionId]);
+
+  useEffect(() => {
+    const end = (event: Event) => {
+      const detail = (event as CustomEvent<{sessionId:string;completion?:Promise<void>}>).detail;
+      if (detail?.sessionId !== sessionId || session.get("voiceActive") !== sessionId) return;
+      const closing = stop();
+      detail.completion = closing;
+      void closing.catch(error => { const message = (error as Error).message; setMessage(message); onError?.(message); });
+    };
     const interrupt = (event: Event) => { if ((event as CustomEvent).detail?.sessionId === sessionId) void room.current?.interrupt(); };
     const playback = (event: Event) => {
       const detail = (event as CustomEvent).detail;
@@ -143,10 +182,11 @@ export function MiniCpmDuplexControl({ sessionId, disabled = false, onModeChange
     if (session.get("voiceDuplexActive") === sessionId) session.remove("voiceDuplexActive");
   }, [sessionId]);
 
+  if (headless) return null;
   return <div className="relative flex items-center gap-1">
-    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start PersonaPlex full-duplex voice")} title={t("Start PersonaPlex full-duplex voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop PersonaPlex full-duplex voice")} title={message || `${t("Stop PersonaPlex full-duplex voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
+    {state === "closed" || state === "error" ? <button type="button" className="prompt-action" disabled={disabled} onClick={start} aria-label={t("Start Yula voice")} title={t("Start Yula voice")}><LuMic aria-hidden /></button> : <button type="button" className="prompt-action" onClick={() => void stop()} aria-label={t("Stop Yula voice")} title={message || `${t("Stop Yula voice")} · ${microphoneLabel}`}>{busy ? <LuLoaderCircle className="animate-spin" aria-hidden /> : <LuMicOff aria-hidden />}</button>}
     {(message || toolActivity || caption) && <span role={state === "error" ? "alert" : undefined} className={`absolute bottom-full right-0 mb-3 w-72 rounded-xl border border-line bg-surface p-3 text-xs shadow-pop ${message ? "text-danger" : "text-fg"}`}>
-      {message || toolActivity || <><span className="font-semibold">PersonaPlex · </span>{caption}</>}
+      {message || toolActivity || <><span className="font-semibold">Yula voice · </span>{caption}</>}
     </span>}
   </div>;
 }

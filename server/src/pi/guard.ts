@@ -17,6 +17,7 @@ import { loadedAt, loadedPlaces, type LoadedAs, type LoadedPlace } from "./loade
 import { loadedByLinks } from "./loaded-links.js";
 // Only the names: a heartbeat's note is registered for heartbeats alone, and is how one says what it read.
 import { HEARTBEAT_ROLE, NOTE_TOOL } from "./heartbeat-names.js";
+import { BACKGROUND_MEMORY_WRITES, BACKGROUND_TOOL } from "./background-names.js";
 import { runsAsPrimary } from "./runs-as-primary.js";
 
 /**
@@ -51,9 +52,11 @@ const UNTRUSTED_COMMAND = /\b(himalaya|mutt|neomutt|notmuch|offlineimap|mbsync|c
  * Does what this call returned carry somebody else's words? Mail and the web
  * read through a command, an MCP server the portal does not control, and the
  * browser, which reads pages anyone can write. The agent's own tools, a
- * subagent's answer and a routine's included, do not mark the conversation.
+ * routine's answer does not mark the conversation. A subagent may have read
+ * external material, so its answer is always treated as untrusted.
  */
 function untrustedResult(toolName: string, input: Record<string, unknown>): boolean {
+  if (toolName === "subagent") return true;
   if (toolName === "bash") return UNTRUSTED_COMMAND.test(cmd(input));
   if (browserCall(toolName, input).isBrowser) return true;
   return /^mcp(_|$)/.test(toolName);
@@ -821,12 +824,29 @@ export function guardExtension(
    */
   workspace?: string,
   /** Other places they may read as well: the skills the agent offers, which are instructions for anybody it serves. */
-  alsoReadable: string[] = []
+  alsoReadable: string[] = [],
+  initialTaint = false
 ) {
   return (pi: any): void => {
     // Per session, not global: a taint belongs to the conversation that read the
     // content, and this factory runs once per session.
-    let tainted = false;
+    let tainted = initialTaint;
+    // Only the bundled launcher advertises this protocol. An older/third-party
+    // launcher remains blocked after external reads, as before.
+    const guardedDelegation = () => {
+      let supported = false;
+      pi.events?.emit("subagent:v1:guard-support", {
+        reply: (version: unknown) => { supported = version === 1; },
+      });
+      return supported;
+    };
+    pi.events?.on("subagent:v1:guard-policy", (event: any) => {
+      event?.reply?.({
+        version: 1,
+        extension: fileURLToPath(new URL("./subagent-guard.js", import.meta.url)),
+        who: whoNow(), enforceTaint, browser: browserNow(), workspace, alsoReadable,
+      });
+    });
     if (portalSessionId) {
       const taint = { mark: () => { tainted = true; }, holds: () => tainted && enforceTaint };
       taints.set(portalSessionId, taint);
@@ -845,7 +865,7 @@ export function guardExtension(
         // A history that cannot be read is not evidence of anything.
       }
       // A new conversation has read nothing yet.
-      tainted = event?.reason === "new" ? found : tainted || found;
+      tainted = initialTaint || (event?.reason === "new" ? found : tainted || found);
     });
 
     pi.on("tool_result", (event: any) => {
@@ -870,6 +890,11 @@ export function guardExtension(
     });
 
     pi.on("tool_call", (event: any) => {
+      // Background execution calls the tool definition without Pi's hooks.
+      // Apply the same role, taint and approval checks to the actual memory write.
+      if (event.toolName === BACKGROUND_TOOL && BACKGROUND_MEMORY_WRITES.has(event.input?.tool)) {
+        event = { ...event, toolName: event.input.tool, input: event.input.args ?? {} };
+      }
       const { role, key } = whoNow();
       const subject = callSubject(event.toolName, event.input ?? {});
       const note = (kind: string, reason: string) =>
@@ -926,7 +951,13 @@ export function guardExtension(
       }
       // The rule that refuses this call because the conversation has read something untrusted, if any.
       // It refuses whatever allows the call, so a one-off approval is not spent on it first: see below.
-      const heldByTaint = tainted && enforceTaint ? RULES.find((r) => r.hit(event.toolName, event.input ?? {})) : undefined;
+      const protectedChild = event.toolName === "subagent" && guardedDelegation();
+      // Include background answers, which arrive as custom messages rather than
+      // tool_result. Neither child summaries nor task text remove the taint.
+      if (protectedChild) tainted = true;
+      const matchedRule = () => RULES.find((r) =>
+        !(r.name === "delegate" && protectedChild) && r.hit(event.toolName, event.input ?? {}));
+      const heldByTaint = tainted && enforceTaint ? matchedRule() : undefined;
       // A one-off approval, spent here. Checked last, after the standing rules,
       // because it is the expensive kind of permission: somebody was asked.
       const granted = () => {
@@ -998,7 +1029,7 @@ export function guardExtension(
       }
 
       if (!tainted) return undefined;
-      const rule = heldByTaint ?? RULES.find((r) => r.hit(event.toolName, event.input ?? {}));
+      const rule = heldByTaint ?? matchedRule();
       if (!rule) return undefined;
 
       // Recorded even when it does not block: "this ran with the guard off" is

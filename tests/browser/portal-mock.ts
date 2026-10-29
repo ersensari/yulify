@@ -59,6 +59,7 @@ const portalBase = ({ path, method, url }: Ask): Answer => {
     config: { user: '', hasPassword: false }, version: null, pages: [], uiPort: '', cursor: true, allowlist: '', configured: false, byDefault: true, sessions: [], routines: [],
   };
   if (path === '/api/voice') return { enabled: false };
+  if (path === '/api/voice/speaker-examples') return {examples:[],next_offset:null,retention_days:7};
   if (/^\/api\/sessions\/[^/]+\/background$/.test(path)) return { supported: true, jobs: [], statuses: [], widgets: [] };
   if (/^\/api\/sessions\/[^/]+\/events\/before$/.test(path)) return { events: [], more: false };
   if (path === '/api/projects' && url.searchParams.has('bare')) return { root: '/w', home: '/h', projects: [] };

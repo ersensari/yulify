@@ -8,3 +8,6 @@
 export const BACKGROUND_SOURCE = "background";
 /** The tool's name, as the model calls it. */
 export const BACKGROUND_TOOL = "run_in_background";
+
+/** mem0 extracts new facts and updates existing facts through this one write tool. */
+export const BACKGROUND_MEMORY_WRITES = new Set(["mem0_memory_add"]);

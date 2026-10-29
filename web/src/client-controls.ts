@@ -19,10 +19,18 @@ export async function handleClientControl(sessionId: string, command: Command) {
   let result: object;
   try {
     if (command.target === "voice") {
-      window.dispatchEvent(new CustomEvent("yulify:end-voice", { detail: { sessionId } }));
-      result = session.get("voiceActive") !== sessionId
-        ? { ok: true, status: "applied", voiceActive: false }
-        : { ok: false, status: "unavailable", message: "The active voice controller did not close." };
+      const detail: {sessionId:string;completion?:Promise<void>} = {sessionId};
+      window.dispatchEvent(new CustomEvent("yulify:end-voice", { detail }));
+      if (!detail.completion) result = { ok: false, status: "unavailable", message: "No active voice controller handled the close request." };
+      else {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([detail.completion, new Promise<never>((_,reject) => { timeout = setTimeout(() => reject(new Error("Voice is still closing.")), 8000); })]);
+          result = session.get("voiceActive") !== sessionId
+            ? { ok: true, status: "applied", voiceActive: false }
+            : { ok: false, status: "unavailable", message: "The active voice controller did not close." };
+        } finally { if (timeout) clearTimeout(timeout); }
+      }
     } else result = await controlMusicPlayer(sessionId, command.action, command.jobId, command.seconds, command.expiresAt);
   } catch (error) {
     result = { ok: false, status: "blocked", message: (error as Error).message || "Playback requires a click in this browser." };

@@ -10,25 +10,29 @@ import { mcpServersRemoved } from "../db.js";
 /**
  * MCP servers, as configured for `pi-mcp-adapter`.
  *
- * The adapter reads several files in precedence order; the portal edits the
- * pi-global one at `<agentDir>/mcp.json`, because every session here shares an
- * agent home and a project-local `.mcp.json` would only reach one workspace.
+ * The adapter reads several files in precedence order. Its 3.x releases use
+ * `<agentDir>/mcp-adapter.json`; older releases use `<agentDir>/mcp.json`.
+ * Prefer the existing modern file so the portal shows and edits the servers
+ * the installed adapter actually loads. Both are pi-global because every
+ * session here shares the same agent home.
  *
  * The shape is the adapter's, not ours — entries are stored as given rather
  * than filtered through a whitelist, so a field a newer adapter understands
  * survives a round trip through this API.
  */
-export const mcpConfigPath = (): string => path.join(piAgentDir(), "mcp.json");
+export const mcpConfigPath = (): string => {
+  const modern = path.join(piAgentDir(), "mcp-adapter.json");
+  return existsSync(modern) ? modern : path.join(piAgentDir(), "mcp.json");
+};
 
 const ADAPTER = "pi-mcp-adapter";
 
 /**
  * Pinned, not whatever npm has today.
  *
- * 3.0 stopped reading `<agentDir>/mcp.json` — the file this portal writes — in
- * favour of `mcp-adapter.json`, and from 2.21.1 the adapter wants pi-ai 0.84 or
- * later where the portal runs 0.82. An unpinned install picked up 3.3 and the
- * agent saw no servers at all. 2.18.0 is the release the portal runs with.
+ * The container portal still runs Pi 0.82 and needs adapter 2.18.0. Native
+ * desktop Pi installations may use newer adapters; their existing config file
+ * remains authoritative above.
  */
 export const ADAPTER_SPEC = `npm:${ADAPTER}@2.18.0`;
 
