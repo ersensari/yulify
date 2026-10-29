@@ -73,3 +73,28 @@ an explicit resolution before the migration can be considered successful.
 Repeat runs must be idempotent, interrupted runs recoverable, and completion must
 be reported only after the copied result passes these checks. No such migration
 or validation has yet been implemented.
+
+## Offline Canvas copy tool
+
+`scripts/migrate-yulify-canvas.mjs` prepares only the Canvas extension's
+`canvases.db` from an explicitly provided, independent copy of the old portal
+database. It does not install that file or open the existing portal. Prepare a
+standalone SQLite copy with no WAL, shared-memory or journal sidecars before
+running; use a coordinated snapshot or a stopped source. Both command paths
+must be absolute. The output must be a new directory outside the source copy's
+directory; an existing output is refused rather than merged or overwritten.
+
+```sh
+node scripts/migrate-yulify-canvas.mjs --source /path/to/independent-copy/portal.db --output /path/to/new-canvas-export
+```
+
+The tool reads the source through a file descriptor and makes its own temporary
+snapshot, checks SQLite integrity and required columns, refuses invalid or
+orphaned records, inserts into a new database in a transaction, and checks all
+fields and the row count. It creates `canvases.db` and `manifest.json` with the
+source snapshot hash and record count. It checks for SQLite sidecars before and
+after copying; the caller remains responsible for ensuring the input really is
+an independent, quiescent copy. A completed directory alone does not remove the
+portal's upgrade guard: voice, media, settings, and the connection of this
+Canvas file to the extension still need a verified migration. Canvas records
+kept only in memory are not included. No end-to-end upgrade has been validated.

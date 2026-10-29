@@ -7,6 +7,7 @@ import {sessions} from '../session-manager.js';
 import {sharedAsr,type TranscriptionSnapshot} from '../shared-asr.js';
 import {MeetingAudio,meetingWav,durableWrite,RATE,PART_SAMPLES} from '../meeting-audio.js';
 import {summarizeMeetingPart} from '../meeting-summary.js';
+import {archiveMeetingSummary} from '../meeting-summary-archive.js';
 interface MeetingState {
   chat:string;filePath:string;startedAt:string;audio:MeetingAudio;recording:boolean;
   source?:string;snapshot:TranscriptionSnapshot;packet:number;offset:number;sourceSequence:number;
@@ -214,10 +215,10 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string)=>
       if(!s.audio.samples)s.snapshot.status='completed';
       if(!s.error){writeParts(s,s.audio.samples/RATE,summarize);save(s);}
       if(req.body?.summarize!==false&&!s.error&&!s.summary&&s.snapshot.turns.length){
-        s.summary=sessions.prompt(session.id,`Read ${path.relative(session.workspace,s.filePath)} and its three-minute part notes in ${path.relative(session.workspace,s.audio.root)}. Summarize topics, decisions and action items in the transcript language. Explicitly disclose any recording gaps. Speaker numbers are anonymous.`).then(()=>{});
-        s.summary.catch(()=>{s.summary=undefined;});
+        // Capture the same chat summary turn, with a durable attempt ID. The
+        // stop response does not wait for the model; status is kept separately.
+        s.summary=archiveMeetingSummary(sessions,session.id,s.filePath,session.workspace).catch(e=>console.error('Meeting summary archive:',e));
       }
-      if(s.summary)await s.summary;
       res.json({ok:true,...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)});
     }catch(e){s.error=(e as Error).message;save(s);res.status(502).json({error:s.error,audio_saved:true,transcriptPath:path.relative(session.workspace,s.filePath)});}
   });
