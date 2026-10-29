@@ -97,6 +97,18 @@ test('ASR failure does not stop durable capture; archives reopen after a restart
   assert.equal(one.status,200);assert.equal(two.status,200);assert.equal(partSummaries,before+1);
   assert.deepEqual(fs.readFileSync(path.join(workspace,value.transcriptPath)),transcript);
   assert.equal((await post('outage','/summary',{transcriptPath:value.transcriptPath})).status,200);assert.equal(partSummaries,before+1);
+  const finalPath=path.join(workspace,value.transcriptPath.replace(/\.txt$/,'.summary.md'));
+  const finalSummary=fs.readFileSync(finalPath);
+  await until(()=>fs.existsSync(path.join(root,'part-0001.summary.md')));
+  const indexFile=path.join(root,'index.json'),index=JSON.parse(fs.readFileSync(indexFile));
+  index.parts[0].summary_status='failed';delete index.parts[0].summary;index.parts[0].error='Synthetic failure';
+  fs.unlinkSync(path.join(root,'part-0001.summary.md'));fs.writeFileSync(indexFile,JSON.stringify(index));
+  const beforeParts=partSummaries;
+  const [a,b]=await Promise.all([post('outage','/part-summaries',{transcriptPath:value.transcriptPath}),post('outage','/part-summaries',{transcriptPath:value.transcriptPath})]);
+  assert.equal(a.status,200);assert.equal(b.status,200);assert.equal(partSummaries,beforeParts+1);
+  assert.equal(JSON.parse(fs.readFileSync(indexFile)).parts[0].summary_status,'completed');
+  assert.deepEqual(fs.readFileSync(finalPath),finalSummary);assert.deepEqual(fs.readFileSync(path.join(workspace,value.transcriptPath)),transcript);
+  await post('outage','/part-summaries',{transcriptPath:value.transcriptPath});assert.equal(partSummaries,beforeParts+1);
 });
 test('meeting summary follows Pi defaults for a new chat and retains explicit or live models',()=>{
   const rt={getModel:(provider,id)=>({provider,id})},saved={provider:'stale',model:'old'},defaults={defaultProvider:'forgeloop-provider',defaultModel:'gyro-gyro-m'};

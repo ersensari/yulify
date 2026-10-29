@@ -204,6 +204,7 @@ function create(chat:string,workspace:string,recovery?:string,title?:string,type
 export function meetingNotesRouter(options:{summarize?:(id:string,text:string,type?:MeetingType)=>Promise<string>}={}):Router{
   const router=express.Router(),summarize=options.summarize??summarizeMeetingPart;
   const retries=new Map<string,Promise<string>>();
+  const partRetries=new Map<string,Promise<{index:number;summary_status:string;error?:string}[]>>();
   const get=(chat:string,workspace:string)=>{
     let s=active.get(chat);
     if(!s){s=recover(chat,workspace);if(s){active.set(chat,s);watch(s,summarize);}}
@@ -262,6 +263,11 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string,ty
         const meta=JSON.parse(fs.readFileSync(stateFile,'utf8'));
         if(meta.chat!==session.id)return res.status(404).json({error:'Meeting not found'});
         const snapshot=JSON.parse(fs.readFileSync(snapshotFile,'utf8'));
+        const indexFile=file.replace(/\.txt$/,'-audio/index.json');
+        if(fs.existsSync(indexFile)&&fs.lstatSync(indexFile).isFile()){
+          const index=JSON.parse(fs.readFileSync(indexFile,'utf8'));
+          snapshot.parts=(index.parts??[]).map((p:any)=>({...p,file:path.posix.join(path.basename(file.replace(/\.txt$/,'-audio')),p.file)}));
+        }
         const summaryFile=file.replace(/\.txt$/,'.summary.md');
         const summary_text=fs.existsSync(summaryFile)&&fs.lstatSync(summaryFile).isFile()?fs.readFileSync(summaryFile,'utf8'):undefined;
         return res.json({...snapshot,title:meta.title,meeting_type:meetingType(meta.meeting_type),summary_text,summary_status:meta.summary_status,summary_error:meta.summary_error,transcriptPath:requested});
@@ -301,6 +307,46 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string,ty
         retries.set(file,work);void work.finally(()=>retries.delete(file)).catch(()=>{});
       }
       res.json({summary_text:await work,summary_status:'completed'});
+    }catch(e){res.status(502).json({error:(e as Error).message});}
+  });
+  router.post('/sessions/:id/meeting/part-summaries',async(req,res)=>{
+    const session=getSession(String(req.params.id));if(!session)return res.status(404).json({error:'Session not found'});
+    const requested=req.body?.transcriptPath;
+    if(typeof requested!=='string'||!/^\.meeting-notes\/meeting-[\w.-]+\.txt$/.test(requested))return res.status(400).json({error:'Invalid meeting transcript path'});
+    const file=path.join(session.workspace,requested),stateFile=file.replace(/\.txt$/,'.state.json'),root=file.replace(/\.txt$/,'-audio'),indexFile=path.join(root,'index.json');
+    try{
+      if(![file,stateFile,indexFile].every(f=>fs.existsSync(f)&&fs.lstatSync(f).isFile()))return res.status(404).json({error:'Meeting not found'});
+      const meta=JSON.parse(fs.readFileSync(stateFile,'utf8'));
+      if(meta.chat!==session.id)return res.status(404).json({error:'Meeting not found'});
+      if(meta.recording)return res.status(409).json({error:'Stop the recording before summarizing'});
+      const current=active.get(session.id);
+      if(current?.filePath===file){if(current.summary)await current.summary;if(current.summarizing)await current.summarizing;}
+      let work=partRetries.get(file);
+      if(!work){
+        work=(async()=>{
+          const archive=JSON.parse(fs.readFileSync(indexFile,'utf8')) as {parts:{index:number;transcript?:string;summary?:string;summary_status?:string;error?:string;start:number;end:number}[]};
+          for(const part of archive.parts??[]){
+            if(part.summary_status!=='failed')continue;
+            try{
+              if(!part.transcript||!/^part-\d+\.txt$/.test(part.transcript))throw new Error('Saved part transcript unavailable');
+              const transcript=path.join(root,part.transcript),summaryName=part.transcript.replace(/\.txt$/,'.summary.md'),summaryPath=path.join(root,summaryName);
+              if(!fs.existsSync(transcript)||!fs.lstatSync(transcript).isFile())throw new Error('Saved part transcript unavailable');
+              // A completed file may have reached disk before an earlier metadata write.
+              if(!fs.existsSync(summaryPath)){
+                const text=await summarizeBounded(session.id,fs.readFileSync(transcript,'utf8'),meetingType(meta.meeting_type),summarize);
+                durableWrite(summaryPath,text+'\n');
+                sessions.recordMeeting(session.id,{kind:'part',meeting:path.basename(file),part:part.index,text:`### Meeting notes · ${label(part.start)}–${label(part.end)}\n\n${text}`});
+              }else if(!fs.lstatSync(summaryPath).isFile())throw new Error('Part summary path is not a regular file');
+              part.summary=summaryName;part.summary_status='completed';delete part.error;
+            }catch(e){part.error=(e as Error).message;}
+            durableWrite(indexFile,JSON.stringify(archive,null,2));
+          }
+          if(current?.filePath===file)for(const part of archive.parts??[]){const live=current.audio.parts.find(p=>p.index===part.index);if(live){live.summary=part.summary;live.summary_status=part.summary_status;live.error=part.error;}}
+          return (archive.parts??[]).map(p=>({index:p.index,summary_status:p.summary_status||'',error:p.error}));
+        })();
+        partRetries.set(file,work);void work.finally(()=>partRetries.delete(file)).catch(()=>{});
+      }
+      res.json({parts:await work});
     }catch(e){res.status(502).json({error:(e as Error).message});}
   });
   // Accept cached 15s clients and up to 5-minute packets. ASR still receives <=2s.
