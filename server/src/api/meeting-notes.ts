@@ -10,7 +10,7 @@ import {summarizeMeetingPart,meetingType,type MeetingType} from '../meeting-summ
 interface MeetingState {
   chat:string;filePath:string;startedAt:string;audio:MeetingAudio;recording:boolean;
   title?:string;meeting_type?:MeetingType;summary_text?:string;summary_status?:'summarizing'|'completed'|'failed';summary_error?:string;
-  source?:string;snapshot:TranscriptionSnapshot;packet:number;offset:number;sourceSequence:number;
+  source?:string;snapshot:TranscriptionSnapshot;packet:number;offset:number;sourceSequence:number;lastUploadAt?:number;
   recovery?:string;error?:string;processing?:Promise<void>;summarizing?:Promise<void>;summary?:Promise<void>;
   watcher?:ReturnType<typeof setInterval>;
 }
@@ -19,7 +19,7 @@ const label=(seconds:number)=>`${String(Math.floor(seconds/3600)).padStart(2,'0'
 const empty=():TranscriptionSnapshot=>({id:'',status:'recording',sample_rate:RATE,samples:0,next_sequence:0,turns:[]});
 const manifest=(s:MeetingState)=>s.filePath.replace(/\.txt$/,'.state.json');
 function save(s:MeetingState){
-  durableWrite(manifest(s),JSON.stringify({chat:s.chat,startedAt:s.startedAt,recording:s.recording,source:s.source,packet:s.packet,offset:s.offset,sourceSequence:s.sourceSequence,recovery:s.recovery,error:s.error,title:s.title,meeting_type:s.meeting_type,summary_status:s.summary_status,summary_error:s.summary_error}));
+  durableWrite(manifest(s),JSON.stringify({chat:s.chat,startedAt:s.startedAt,recording:s.recording,source:s.source,packet:s.packet,offset:s.offset,sourceSequence:s.sourceSequence,lastUploadAt:s.lastUploadAt,recovery:s.recovery,error:s.error,title:s.title,meeting_type:s.meeting_type,summary_status:s.summary_status,summary_error:s.summary_error}));
   const text=`# Meeting started ${s.startedAt}\n# Audio: ${path.basename(s.audio.root)}\n# Recording: ${s.recording?'active':'stopped'}\n${s.recovery?`# Recording gap: ${s.recovery}\n`:''}${s.error?`# Transcription notice: ${s.error}\n`:''}\n`+s.snapshot.turns.map(t=>`[${label(t.start)} – ${label(t.end)}] ${t.speaker}${t.overlap?' (overlap)':''}: ${t.text}`).join('\n')+'\n';
   durableWrite(s.filePath,text);durableWrite(s.filePath.replace(/\.txt$/,'.json'),JSON.stringify(payload(s),null,2));
 }
@@ -108,6 +108,22 @@ function watch(s:MeetingState,summarize:(id:string,text:string,type?:MeetingType
   clearInterval(s.watcher);
   s.watcher=setInterval(()=>{
     if(!s.recording){clearInterval(s.watcher);return;}
+    // The browser normally sends a packet each second. A disappeared source
+    // cannot flush or stop itself, so close its archive after a bounded gap.
+    const last=s.lastUploadAt ?? Date.parse(s.audio.packets.at(-1)?.created ?? s.startedAt);
+    if(Number.isFinite(last) && Date.now()-last>90_000){
+      s.recording=false;clearInterval(s.watcher);
+      s.recovery=[s.recovery,'Audio source was inactive for 90 seconds; only received audio is available.'].filter(Boolean).join(' ');
+      try{s.audio.buildParts(true);save(s);}catch(e){s.error=`Could not finalize saved audio: ${(e as Error).message}`;save(s);return;}
+      void (async()=>{
+        await processAudio(s,summarize);
+        if(s.source&&!s.error)s.snapshot=await sharedAsr<TranscriptionSnapshot>(`/sessions/${s.source}/stop`,{method:'POST'});
+        if(!s.audio.samples)s.snapshot.status='completed';
+        if(!s.error)writeParts(s,s.audio.samples/RATE,summarize);
+        save(s);
+      })().catch(e=>{s.error=(e as Error).message;save(s);});
+      return;
+    }
     if(s.packet<s.audio.packets.length)void processAudio(s,summarize);
     else if(s.source&&!s.processing)void sharedAsr<TranscriptionSnapshot>(`/sessions/${s.source}`).then(value=>{s.snapshot=value;save(s);}).catch(e=>{s.error=(e as Error).message;});
   },2000);s.watcher.unref();
@@ -183,7 +199,7 @@ export async function reprocessMeeting(chat:string,workspace:string,transcriptNa
 function create(chat:string,workspace:string,recovery?:string,title?:string,type:MeetingType='general'):MeetingState {
   const dir=path.join(workspace,'.meeting-notes');fs.mkdirSync(dir,{recursive:true});const startedAt=new Date().toISOString();
   const filePath=path.join(dir,`meeting-${startedAt.replace(/[:.]/g,'-')}.txt`);
-  const s:MeetingState={chat,filePath,startedAt,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),recording:true,snapshot:empty(),packet:0,offset:0,sourceSequence:0,recovery,title,meeting_type:type};save(s);return s;
+  const s:MeetingState={chat,filePath,startedAt,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),recording:true,snapshot:empty(),packet:0,offset:0,sourceSequence:0,lastUploadAt:Date.now(),recovery,title,meeting_type:type};save(s);return s;
 }
 export function meetingNotesRouter(options:{summarize?:(id:string,text:string,type?:MeetingType)=>Promise<string>}={}):Router{
   const router=express.Router(),summarize=options.summarize??summarizeMeetingPart;
@@ -267,7 +283,7 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string,ty
         s=create(session.id,session.workspace,'The earlier upload protocol rejected audio. Only audio received after recovery is available.');
         active.set(session.id,s);watch(s,summarize);
       }
-      s.audio.append(req.body,header===undefined?undefined:Number(header));save(s);
+      s.audio.append(req.body,header===undefined?undefined:Number(header));s.lastUploadAt=Date.now();save(s);
       res.json({...payload(s),ok:true,transcriptPath:path.relative(session.workspace,s.filePath)});
       void processAudio(s,summarize);
     }catch(e){res.status(400).json({error:(e as Error).message});}

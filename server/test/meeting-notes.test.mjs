@@ -11,7 +11,7 @@ const {sessions}=await import('../dist/session-manager.js');
 const {meetingNotesRouter}=await import('../dist/api/meeting-notes.js');
 const {meetingWav,MeetingAudio}=await import('../dist/meeting-audio.js');
 const workspace=path.join(home,'work');fs.mkdirSync(workspace,{recursive:true});
-for(const id of ['meeting','legacy','parts','outage'])createSession({id,title:id,workspace,executor:'host',auto_title:0});
+for(const id of ['meeting','legacy','parts','outage','abandoned'])createSession({id,title:id,workspace,executor:'host',auto_title:0});
 let summaryCount=0,partSummaries=0,down=false;const inputs=[],sources=new Map();
 sessions.prompt=async()=>{summaryCount++;};
 const upstream=http.createServer(async(req,res)=>{
@@ -53,9 +53,23 @@ test('sequence retries do not duplicate durable audio; Stop summarizes once',asy
   assert.equal((await audio('meeting',15,0)).status,200);
   const repeat=await (await audio('meeting',15,0)).json();assert.equal(repeat.recorded_seconds,15);
   assert.equal((await audio('meeting',15,2)).status,400);
-  const before=summaryCount;
-  assert.equal((await post('meeting','/stop')).status,200);assert.equal((await post('meeting','/stop')).status,200);assert.equal(summaryCount,before+1);
+  const before=partSummaries;
+  assert.equal((await post('meeting','/stop')).status,200);assert.equal((await post('meeting','/stop')).status,200);assert.equal(partSummaries,before+2);
   assert.match(fs.readFileSync(path.join(workspace,value.transcriptPath),'utf8'),/Speaker 1: Merhaba/);
+});
+test('an abandoned source closes with its saved audio and a recording gap notice',async()=>{
+  const value=await (await post('abandoned','/start')).json();
+  assert.equal((await audio('abandoned',1,0)).status,200);
+  const original=Date.now;
+  try{
+    Date.now=()=>original()+91_000;
+    await new Promise(resolve=>setTimeout(resolve,2300));
+  }finally{Date.now=original;}
+  const state=await (await fetch(`${base}/abandoned/meeting`)).json();
+  assert.equal(state.recording,false);assert.match(state.recovery_notice,/inactive for 90 seconds/);
+  assert.equal(state.recorded_seconds,1);
+  const root=path.join(workspace,value.transcriptPath.replace(/\.txt$/,'-audio'));
+  assert.equal(fs.statSync(path.join(root,'part-0001.wav')).size,32044);
 });
 test('three-minute WAV parts, transcripts and isolated summaries are produced while recording',async()=>{
   const value=await (await post('parts','/start')).json();const before=partSummaries;
