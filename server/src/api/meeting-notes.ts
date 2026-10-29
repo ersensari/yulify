@@ -2,13 +2,14 @@
 import express,{type Router} from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import {getSession} from '../db.js';
+import {getSession,getDb,listChatSessions} from '../db.js';
 import {sessions} from '../session-manager.js';
 import {sharedAsr,type TranscriptionSnapshot} from '../shared-asr.js';
 import {MeetingAudio,meetingWav,durableWrite,RATE,PART_SAMPLES} from '../meeting-audio.js';
-import {summarizeMeetingPart} from '../meeting-summary.js';
+import {summarizeMeetingPart,meetingType,type MeetingType} from '../meeting-summary.js';
 interface MeetingState {
   chat:string;filePath:string;startedAt:string;audio:MeetingAudio;recording:boolean;
+  title?:string;meeting_type?:MeetingType;summary_text?:string;summary_status?:'summarizing'|'completed'|'failed';summary_error?:string;
   source?:string;snapshot:TranscriptionSnapshot;packet:number;offset:number;sourceSequence:number;
   recovery?:string;error?:string;processing?:Promise<void>;summarizing?:Promise<void>;summary?:Promise<void>;
   watcher?:ReturnType<typeof setInterval>;
@@ -18,14 +19,32 @@ const label=(seconds:number)=>`${String(Math.floor(seconds/3600)).padStart(2,'0'
 const empty=():TranscriptionSnapshot=>({id:'',status:'recording',sample_rate:RATE,samples:0,next_sequence:0,turns:[]});
 const manifest=(s:MeetingState)=>s.filePath.replace(/\.txt$/,'.state.json');
 function save(s:MeetingState){
-  durableWrite(manifest(s),JSON.stringify({chat:s.chat,startedAt:s.startedAt,recording:s.recording,source:s.source,packet:s.packet,offset:s.offset,sourceSequence:s.sourceSequence,recovery:s.recovery,error:s.error}));
+  durableWrite(manifest(s),JSON.stringify({chat:s.chat,startedAt:s.startedAt,recording:s.recording,source:s.source,packet:s.packet,offset:s.offset,sourceSequence:s.sourceSequence,recovery:s.recovery,error:s.error,title:s.title,meeting_type:s.meeting_type,summary_status:s.summary_status,summary_error:s.summary_error}));
   const text=`# Meeting started ${s.startedAt}\n# Audio: ${path.basename(s.audio.root)}\n# Recording: ${s.recording?'active':'stopped'}\n${s.recovery?`# Recording gap: ${s.recovery}\n`:''}${s.error?`# Transcription notice: ${s.error}\n`:''}\n`+s.snapshot.turns.map(t=>`[${label(t.start)} – ${label(t.end)}] ${t.speaker}${t.overlap?' (overlap)':''}: ${t.text}`).join('\n')+'\n';
   durableWrite(s.filePath,text);durableWrite(s.filePath.replace(/\.txt$/,'.json'),JSON.stringify(payload(s),null,2));
 }
 function payload(s:MeetingState){return {...s.snapshot,status:s.recording?'recording':s.snapshot.status,recording:s.recording,audio_saved:true,recorded_seconds:s.audio.samples/RATE,next_sequence:s.audio.packets.length,
+  title:s.title,meeting_type:meetingType(s.meeting_type),summary_text:s.summary_text,summary_status:s.summary_status,summary_error:s.summary_error,
   transcription_status:s.error?'pending':s.snapshot.status,error:s.error||s.snapshot.error,recovery_notice:s.recovery,
   parts:s.audio.parts.map(p=>({...p,file:path.posix.join(path.basename(s.audio.root),p.file)}))};}
-function writeParts(s:MeetingState,through:number,summarize:(id:string,text:string)=>Promise<string>){
+/** Reduce all source chunks; never silently drop the end of a long meeting. */
+async function summarizeBounded(chat:string,source:string,type:MeetingType,summarize:(id:string,text:string,type?:MeetingType)=>Promise<string>):Promise<string>{
+  const limit=12000;
+  let input=source;
+  for(let round=0;round<8;round++){
+    const chunks:string[]=[];
+    for(let i=0;i<input.length;i+=limit)chunks.push(input.slice(i,i+limit));
+    if(!chunks.length)throw new Error('No meeting text to summarize');
+    const notes:string[]=[];
+    for(const chunk of chunks)notes.push(await summarize(chat,chunk,type));
+    if(notes.length===1)return notes[0];
+    const next=notes.join('\n\n');
+    if(next.length>=input.length)throw new Error('Meeting summaries did not reduce the source enough; saved transcripts are available');
+    input=next;
+  }
+  throw new Error('Meeting summary exceeded the reduction limit; saved transcripts are available');
+}
+function writeParts(s:MeetingState,through:number,summarize:(id:string,text:string,type?:MeetingType)=>Promise<string>){
   for(const part of s.audio.parts){
     if(part.transcript||part.end>through)continue;
     const turns=s.snapshot.turns.filter(t=>t.start<part.end&&t.end>part.start);
@@ -35,14 +54,15 @@ function writeParts(s:MeetingState,through:number,summarize:(id:string,text:stri
     part.summary_status='queued';s.audio.save();
     s.summarizing=(s.summarizing??Promise.resolve()).then(async()=>{
       try{
-        part.summary_status='summarizing';s.audio.save();const notes=await summarize(s.chat,text);
+        part.summary_status='summarizing';s.audio.save();const notes=await summarizeBounded(s.chat,text,meetingType(s.meeting_type),summarize);
         part.summary=part.file.replace(/\.wav$/,'.summary.md');durableWrite(path.join(s.audio.root,part.summary),notes+'\n');part.summary_status='completed';delete part.error;
+        sessions.recordMeeting(s.chat,{kind:'part',meeting:path.basename(s.filePath),part:part.index,text:`### Meeting notes · ${label(part.start)}–${label(part.end)}\n\n${notes}`});
       }catch(e){part.summary_status='failed';part.error=(e as Error).message;}
       s.audio.save();save(s);
     }).catch(e=>{s.error=`Could not save part summary: ${(e as Error).message}`;});
   }
 }
-async function processAudio(s:MeetingState,summarize:(id:string,text:string)=>Promise<string>){
+async function processAudio(s:MeetingState,summarize:(id:string,text:string,type?:MeetingType)=>Promise<string>){
   if(s.processing)return s.processing;
   if(!s.audio.packets.length || (s.packet>=s.audio.packets.length&&s.snapshot.status==='completed'))return;
   const task=(async()=>{
@@ -84,7 +104,7 @@ async function processAudio(s:MeetingState,summarize:(id:string,text:string)=>Pr
   s.processing=task;
   await task;s.processing=undefined;
 }
-function watch(s:MeetingState,summarize:(id:string,text:string)=>Promise<string>){
+function watch(s:MeetingState,summarize:(id:string,text:string,type?:MeetingType)=>Promise<string>){
   clearInterval(s.watcher);
   s.watcher=setInterval(()=>{
     if(!s.recording){clearInterval(s.watcher);return;}
@@ -101,13 +121,15 @@ function recover(chat:string,workspace:string):MeetingState|undefined {
     const filePath=file.replace(/\.state\.json$/,'.txt');
     const snapshotFile=filePath.replace(/\.txt$/,'.json');
     const snapshot=fs.existsSync(snapshotFile)?JSON.parse(fs.readFileSync(snapshotFile,'utf8')):empty();
-    return {...value,chat,filePath,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),snapshot};
+    const summaryPath=filePath.replace(/\.txt$/,'.summary.md');
+    const summary_text=fs.existsSync(summaryPath)?fs.readFileSync(summaryPath,'utf8'):undefined;
+    return {...value,chat,filePath,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),snapshot,summary_text};
   }
 }
 
 /** Reprocess a saved meeting without changing its original audio or transcript on failure. */
 export async function reprocessMeeting(chat:string,workspace:string,transcriptName?:string,
-  summarize:(id:string,text:string)=>Promise<string>=summarizeMeetingPart){
+  summarize:(id:string,text:string,type?:MeetingType)=>Promise<string>=summarizeMeetingPart){
   const dir=path.join(workspace,'.meeting-notes');
   const names=fs.readdirSync(dir).filter(n=>/^meeting-.*\.state\.json$/.test(n)).sort().reverse();
   const selected=transcriptName?transcriptName.replace(/\.txt$/,''):names[0]?.replace(/\.state\.json$/,'');
@@ -158,30 +180,77 @@ export async function reprocessMeeting(chat:string,workspace:string,transcriptNa
     throw error;
   }
 }
-function create(chat:string,workspace:string,recovery?:string):MeetingState {
+function create(chat:string,workspace:string,recovery?:string,title?:string,type:MeetingType='general'):MeetingState {
   const dir=path.join(workspace,'.meeting-notes');fs.mkdirSync(dir,{recursive:true});const startedAt=new Date().toISOString();
   const filePath=path.join(dir,`meeting-${startedAt.replace(/[:.]/g,'-')}.txt`);
-  const s:MeetingState={chat,filePath,startedAt,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),recording:true,snapshot:empty(),packet:0,offset:0,sourceSequence:0,recovery};save(s);return s;
+  const s:MeetingState={chat,filePath,startedAt,audio:new MeetingAudio(filePath.replace(/\.txt$/,'-audio')),recording:true,snapshot:empty(),packet:0,offset:0,sourceSequence:0,recovery,title,meeting_type:type};save(s);return s;
 }
-export function meetingNotesRouter(options:{summarize?:(id:string,text:string)=>Promise<string>}={}):Router{
+export function meetingNotesRouter(options:{summarize?:(id:string,text:string,type?:MeetingType)=>Promise<string>}={}):Router{
   const router=express.Router(),summarize=options.summarize??summarizeMeetingPart;
   const get=(chat:string,workspace:string)=>{
     let s=active.get(chat);
     if(!s){s=recover(chat,workspace);if(s){active.set(chat,s);watch(s,summarize);}}
     return s;
   };
+  router.get('/meetings',(_req,res)=>{
+    try {
+      const meetings: {sessionId:string;title:string;type:MeetingType;startedAt:string;recording:boolean;transcriptPath?:string}[]=[];
+      for(const session of listChatSessions()){
+        const configs=getDb().prepare("SELECT payload,created_at FROM events WHERE session_id=? AND type='portal_meeting_config' ORDER BY seq DESC LIMIT 1").get(session.id) as {payload:string;created_at:string}|undefined;
+        const config=configs?JSON.parse(configs.payload):undefined;
+        const dir=path.join(session.workspace,'.meeting-notes');
+        let found=false;
+        if(fs.existsSync(dir)) for(const name of fs.readdirSync(dir).filter(n=>/^meeting-[\w.-]+\.state\.json$/.test(n)).sort().reverse()){
+          let meta:any;try{meta=JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch{continue;}
+          if(meta.chat!==session.id)continue;
+          found=true;meetings.push({sessionId:session.id,title:meta.title||config?.title||session.title,type:meetingType(meta.meeting_type||config?.type),startedAt:meta.startedAt||configs?.created_at||'',recording:!!meta.recording,transcriptPath:path.posix.join('.meeting-notes',name.replace(/\.state\.json$/,'.txt'))});
+        }
+        if(!found&&config)meetings.push({sessionId:session.id,title:config.title||session.title,type:meetingType(config.type),startedAt:configs!.created_at,recording:false});
+      }
+      meetings.sort((a,b)=>b.startedAt.localeCompare(a.startedAt));res.json({meetings});
+    } catch(e){res.status(500).json({error:(e as Error).message});}
+  });
+  router.post('/sessions/:id/meeting/config',(req,res)=>{
+    const session=getSession(String(req.params.id));if(!session)return res.status(404).json({error:'Session not found'});
+    if(meetingType(req.body?.type)!==req.body?.type)return res.status(400).json({error:'Invalid meeting type'});
+    if(typeof req.body?.title!=='string'||!req.body.title.trim()||req.body.title.length>160)return res.status(400).json({error:'Invalid meeting title'});
+    const value={title:req.body.title.trim(),type:req.body.type};
+    // Config is independent of audio state, so opening the page never starts capture.
+    getDb().prepare("INSERT INTO events (session_id,type,payload,created_at) VALUES (?,?,?,?)").run(session.id,'portal_meeting_config',JSON.stringify(value),new Date().toISOString());
+    res.json({ok:true,...value});
+  });
   router.post('/sessions/:id/meeting/start',async(req,res)=>{
     const session=getSession(String(req.params.id));if(!session)return res.status(404).json({error:'Session not found'});
     try{
       const old=get(session.id,session.workspace);if(old?.recording)return res.status(409).json({error:'A meeting is already being recorded in this chat'});
-      const s=create(session.id,session.workspace);active.set(session.id,s);watch(s,summarize);
+      if(req.body?.type !== undefined && meetingType(req.body.type)!==req.body.type)return res.status(400).json({error:'Invalid meeting type'});
+      if(req.body?.title !== undefined && (typeof req.body.title !== 'string' || req.body.title.length > 160))return res.status(400).json({error:'Invalid meeting title'});
+      const configRow=getDb().prepare("SELECT payload FROM events WHERE session_id=? AND type='portal_meeting_config' ORDER BY seq DESC LIMIT 1").get(session.id) as {payload:string}|undefined;
+      const config=configRow?JSON.parse(configRow.payload):{};
+      const s=create(session.id,session.workspace,undefined,req.body?.title?.trim() || config.title || undefined,meetingType(req.body?.type ?? config.type));active.set(session.id,s);watch(s,summarize);
+      sessions.recordMeeting(s.chat,{kind:'start',meeting:path.basename(s.filePath),text:`Meeting started: ${s.title||'Meeting'} (${meetingType(s.meeting_type)})`});
       res.json({ok:true,...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)});
     }catch(e){res.status(503).json({error:(e as Error).message});}
   });
   router.get('/sessions/:id/meeting',async(req,res)=>{
     const session=getSession(String(req.params.id));if(!session)return res.status(404).json({error:'Session not found'});
-    try{const s=get(session.id,session.workspace);res.json(s?{...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)}:{status:'idle',recording:false,turns:[]});}
-    catch(e){res.status(502).json({error:(e as Error).message});}
+    try{
+      if(req.query.transcriptPath !== undefined){
+        const requested=req.query.transcriptPath;
+        // Only a direct, canonical transcript path can select an archive.
+        if(typeof requested!=='string'||!/^\.meeting-notes\/meeting-[\w.-]+\.txt$/.test(requested))return res.status(400).json({error:'Invalid meeting transcript path'});
+        const file=path.join(session.workspace,requested);
+        const stateFile=file.replace(/\.txt$/,'.state.json'),snapshotFile=file.replace(/\.txt$/,'.json');
+        if(![file,stateFile,snapshotFile].every(f=>fs.existsSync(f)&&fs.lstatSync(f).isFile()))return res.status(404).json({error:'Meeting not found'});
+        const meta=JSON.parse(fs.readFileSync(stateFile,'utf8'));
+        if(meta.chat!==session.id)return res.status(404).json({error:'Meeting not found'});
+        const snapshot=JSON.parse(fs.readFileSync(snapshotFile,'utf8'));
+        const summaryFile=file.replace(/\.txt$/,'.summary.md');
+        const summary_text=fs.existsSync(summaryFile)&&fs.lstatSync(summaryFile).isFile()?fs.readFileSync(summaryFile,'utf8'):undefined;
+        return res.json({...snapshot,title:meta.title,meeting_type:meetingType(meta.meeting_type),summary_text,summary_status:meta.summary_status,summary_error:meta.summary_error,transcriptPath:requested});
+      }
+      const s=get(session.id,session.workspace);res.json(s?{...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)}:{status:'idle',recording:false,turns:[]});
+    }catch(e){res.status(502).json({error:(e as Error).message});}
   });
   // Accept cached 15s clients and up to 5-minute packets. ASR still receives <=2s.
   router.post('/sessions/:id/meeting/chunk',express.raw({type:'audio/wav',limit:'12mb'}),async(req,res)=>{
@@ -209,13 +278,30 @@ export function meetingNotesRouter(options:{summarize?:(id:string,text:string)=>
     try{
       if(req.body?.incomplete===true)s.recovery=[s.recovery,'Capture or upload ended with an error; only received audio is available.'].filter(Boolean).join(' ');
       s.recording=false;clearInterval(s.watcher);s.audio.buildParts(true);save(s);
+      sessions.recordMeeting(s.chat,{kind:'stop',meeting:path.basename(s.filePath),text:`Meeting recording stopped. Audio saved: ${label(s.audio.samples/RATE)}.`});
       await processAudio(s,summarize);
       if(s.source&&!s.error)s.snapshot=await sharedAsr<TranscriptionSnapshot>(`/sessions/${s.source}/stop`,{method:'POST'});
       if(!s.audio.samples)s.snapshot.status='completed';
       if(!s.error){writeParts(s,s.audio.samples/RATE,summarize);save(s);}
       if(req.body?.summarize!==false&&!s.error&&!s.summary&&s.snapshot.turns.length){
-        s.summary=sessions.prompt(session.id,`Read ${path.relative(session.workspace,s.filePath)} and its three-minute part notes in ${path.relative(session.workspace,s.audio.root)}. Summarize topics, decisions and action items in the transcript language. Explicitly disclose any recording gaps. Speaker numbers are anonymous.`).then(()=>{});
-        s.summary.catch(()=>{s.summary=undefined;});
+        s.summary=(async()=>{
+          try {
+            if(s.summarizing)await s.summarizing;
+            s.summary_status='summarizing';delete s.summary_error;save(s);
+            // Part notes bound the final request; if unavailable, use a bounded transcript.
+            const partNotes=s.audio.parts.flatMap(p=>{
+              const file=p.summary||p.transcript;
+              return file?[fs.readFileSync(path.join(s.audio.root,file),'utf8')]:[];
+            }).join('\n\n');
+            const source=partNotes||s.snapshot.turns.map(t=>`[${label(t.start)}] ${t.speaker}: ${t.text}`).join('\n');
+            s.summary_text=await summarizeBounded(s.chat,source,meetingType(s.meeting_type),summarize);
+            durableWrite(s.filePath.replace(/\.txt$/,'.summary.md'),s.summary_text+'\n');
+            s.summary_status='completed';
+            sessions.recordMeeting(s.chat,{kind:'summary',meeting:path.basename(s.filePath),text:`### Meeting summary\n\n${s.summary_text}`});
+          } catch(error) {s.summary_status='failed';s.summary_error=(error as Error).message;
+            sessions.recordMeeting(s.chat,{kind:'error',meeting:path.basename(s.filePath),text:`Meeting summary failed: ${s.summary_error}. Audio and transcript remain saved.`});}
+          save(s);
+        })();
       }
       if(s.summary)await s.summary;
       res.json({ok:true,...payload(s),transcriptPath:path.relative(session.workspace,s.filePath)});

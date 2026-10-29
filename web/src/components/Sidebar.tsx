@@ -14,6 +14,7 @@ import {
   LuBrain,
   LuImage,
   LuMessagesSquare,
+  LuNotebookPen,
   LuPlus,
   LuSearch,
   LuSettings,
@@ -59,7 +60,7 @@ export const Sidebar = memo(function Sidebar({
   executor: string;
   activeId: string | null;
   /** Which top-level destination is showing, so the nav can mark it. */
-  view: "chat" | "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit";
+  view: "chat" | "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit" | "meetings";
   /** Whether the optional browser service is there at all. */
   hasBrowser: boolean;
   /** Understory is the agent's memory: its page is there to read. */
@@ -192,6 +193,7 @@ export const Sidebar = memo(function Sidebar({
 
   const destinations: { to: Destination; icon: ReactNode; label: string }[] = [
     { to: "sessions", icon: <LuMessagesSquare />, label: t("Sessions") },
+    { to: "meetings", icon: <LuNotebookPen />, label: t("Meetings") },
     { to: "projects", icon: <LuFolderKanban />, label: t("Projects") },
     { to: "agents", icon: <LuBot />, label: t("Agents") },
     { to: "routines", icon: <LuClock />, label: t("Routines") },
@@ -368,7 +370,7 @@ const GroupLabel = ({ children }: { children: ReactNode }) => (
   </p>
 );
 
-type Destination = "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit";
+type Destination = "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit" | "meetings";
 
 function RailButton({
   icon,

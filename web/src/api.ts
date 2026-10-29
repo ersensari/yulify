@@ -9,6 +9,9 @@ import type { Host, VoiceChoice } from "../../server/src/voice-engines";
 import type { OrbStyle } from "../../server/src/orb-style";
 import type { OutputFormat } from "../../server/src/image-settings";
 export type SessionStatus = "idle" | "running" | "error" | "interrupted";
+export type MeetingType = "general" | "standup" | "planning" | "interview" | "retrospective" | "lecture";
+export type MeetingSnapshot = TranscriptionSnapshot & { transcriptPath?: string; meeting_type?: MeetingType; title?: string; summary_text?: string; summary_status?: string; summary_error?: string };
+export interface MeetingEntry { sessionId: string; title: string; type: MeetingType; startedAt: string; recording: boolean; transcriptPath?: string }
 
 export interface Session {
   id: string;
@@ -474,15 +477,17 @@ export const api = {
       return null;
     }
   },
-  startMeeting: (sessionId: string) => json<TranscriptionSnapshot & {transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/start`, { method: "POST" }),
-  meetingStatus: (sessionId: string) => json<TranscriptionSnapshot & {transcriptPath?:string}>(`/api/sessions/${sessionId}/meeting`),
+  startMeeting: (sessionId: string) => json<MeetingSnapshot & {transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/start`, { method: "POST", body: "{}" }),
+  meetings: () => json<{meetings: MeetingEntry[]}>("/api/meetings"),
+  configureMeeting: (sessionId: string, title: string, type: MeetingType) => json<{ok: boolean}>(`/api/sessions/${sessionId}/meeting/config`, { method: "POST", body: JSON.stringify({title, type}) }),
+  meetingStatus: (sessionId: string, transcriptPath?: string) => json<MeetingSnapshot>(`/api/sessions/${sessionId}/meeting${transcriptPath ? `?transcriptPath=${encodeURIComponent(transcriptPath)}` : ""}`),
   sendMeetingChunk: async (sessionId: string, samples: Float32Array, sequence: number): Promise<TranscriptionSnapshot> => {
     const res = await send(`/api/sessions/${sessionId}/meeting/chunk`, { method: "POST", headers: { "Content-Type": "audio/wav", "X-Audio-Sequence": String(sequence) }, body: samplesWav(samples), signal:AbortSignal.timeout(30_000) });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new ApiError(body.error || "Could not save meeting audio", res.status, body);
     return body as TranscriptionSnapshot;
   },
-  stopMeeting: (sessionId: string, summarize = true, incomplete = false) => json<TranscriptionSnapshot & {ok:boolean;transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/stop`, { method: "POST",body:JSON.stringify({summarize,incomplete}) }),
+  stopMeeting: (sessionId: string, summarize = true, incomplete = false) => json<MeetingSnapshot & {ok:boolean;transcriptPath:string}>(`/api/sessions/${sessionId}/meeting/stop`, { method: "POST",body:JSON.stringify({summarize,incomplete}) }),
   speakerExamples: (offset=0) => json<{examples:SpeakerExample[];next_offset?:number|null;retention_days:number}>(`/api/voice/speaker-examples?offset=${offset}`),
   assignSpeakerExample: (id:string,person:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"PUT",body:JSON.stringify({person})}),
   deleteSpeakerExample: (id:string) => json<{ok:boolean}>(`/api/voice/speaker-examples/${id}`,{method:"DELETE"}),

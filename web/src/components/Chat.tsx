@@ -182,6 +182,8 @@ function without(list: string[], id: string): string[] {
 
 export function Chat({
   session,
+  meeting = false,
+  meetingRecord,
   events,
   onSend,
   onEditMessage,
@@ -197,6 +199,8 @@ export function Chat({
   onLoadEarlier,
 }: {
   session: Session;
+  meeting?: boolean;
+  meetingRecord?: string;
   events: PortalEvent[];
   /** The conversation is still arriving; drawing it now would show it half-built. */
   loading?: boolean;
@@ -1816,7 +1820,7 @@ export function Chat({
 
         {loading && <TranscriptSkeleton />}
 
-        {!loading && items.length === 0 && (
+        {!loading && items.length === 0 && !meeting && (
           <div className="chat-empty pt-16 text-center">
             <img src="/icon-192.png" alt="" draggable={false} className="chat-empty-mark mx-auto mb-4 h-11 w-11 object-contain" />
             <p className="text-sm text-fg-muted">{t("Give pi a task.")}</p>
@@ -1855,6 +1859,7 @@ export function Chat({
           );
         })}
 
+          {meeting && <MeetingNotes key={`meeting-${session.id}-${meetingRecord || "live"}`} sessionId={session.id} record={meetingRecord} />}
           {actionError && (
             <div role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">{actionError}</div>
           )}
@@ -2119,7 +2124,6 @@ export function Chat({
               </button>
               <DictationButton dictation={dictation} />
               <VoiceControl folder={session.workspace} canvasOpen={canvasOpen} onCanvasMinimize={()=>setCanvasOpen(false)} onCanvasToggle={()=>setCanvasOpen(value=>!value)} key={session.id} sessionId={session.id} items={items} running={running} work={phase} onSend={onSend} onAbort={onAbort} stageTarget={voiceLayout==='mini'?miniVoiceHost:voiceHost} voiceLayout={voiceLayout} onModeChange={setVoiceMode} title={session.title} browserAvailable={browserUp} browserActivity={browserActivity} terminalActivity={terminalActivity} toolEvents={events} />
-              <MeetingNotes key={`meeting-${session.id}`} sessionId={session.id} />
               {/* Mid-run, Stop stays while a message is written: it is the
                   moment the agent is seen going the wrong way, and whether to
                   steer it or stop it is still open. */}

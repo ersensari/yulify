@@ -403,6 +403,7 @@ export function buildTranscript(events: PortalEvent[], options: { ended?: boolea
 
       // A background completion is its own message; it must not close or replace a streaming reply.
       case "portal_music_ready":
+      case "portal_meeting":
         items.push({ kind: "assistant", id: `a${ev.seq}`, text: String(p.text ?? ""), thinking: "", done: true });
         break;
 

@@ -1,16 +1,18 @@
 import { holdDesktopCapture } from "../desktop";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LuNotebookPen, LuLoaderCircle } from "react-icons/lu";
-import { api, type TranscriptionSnapshot } from "../api";
+import { api, type MeetingSnapshot } from "../api";
 import { joinSamples } from "../samples";
 
 const time = (seconds:number) => `${String(Math.floor(seconds/60)).padStart(2,"0")}:${String(Math.floor(seconds)%60).padStart(2,"0")}`;
 
 /** Continuous PCM with an ordered sample clock; segmentation belongs to ASR. */
-export function MeetingNotes({ sessionId }: { sessionId: string }) {
+export function MeetingNotes({ sessionId, record }: { sessionId: string; record?: string }) {
   const [recording,setRecording]=useState(false),[busy,setBusy]=useState(false);
-  const [error,setError]=useState<string|null>(null),[open,setOpen]=useState(false);
-  const [snapshot,setSnapshot]=useState<TranscriptionSnapshot>(),[file,setFile]=useState("");
+  const [error,setError]=useState<string|null>(null);
+  const [snapshot,setSnapshot]=useState<MeetingSnapshot>(),[file,setFile]=useState("");
+  const [ownedElsewhere,setOwnedElsewhere]=useState(false);
+  const mounted=useRef(false), starting=useRef(false);
   const context=useRef<AudioContext|null>(null),stream=useRef<MediaStream|null>(null);
   const processor=useRef<ScriptProcessorNode|null>(null),buffer=useRef<Float32Array[]>([]);
   const buffered=useRef(0),sequence=useRef(0),pending=useRef(0);
@@ -63,16 +65,20 @@ export function MeetingNotes({ sessionId }: { sessionId: string }) {
   stopRef.current=stop;
 
   const start=useCallback(async()=>{
+    if(starting.current)return;
+    starting.current=true;
     setError(null);setBusy(true);
     try {
       if(!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)throw new Error("A microphone needs HTTPS or localhost.");
       await holdDesktopCapture("meeting:"+sessionId,true);
       const mic=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
       stream.current=mic;
+      if(!mounted.current)throw new Error("Meeting view closed before recording started");
       const audio=new AudioContext({sampleRate:16000});context.current=audio;
       if(audio.sampleRate!==16000)throw new Error("This browser cannot capture meeting audio at 16 kHz.");
       await audio.resume();
       const initial=await api.startMeeting(sessionId);created.current=true;
+      if(!mounted.current)throw new Error("Meeting view closed before recording started");
       setSnapshot(initial);setFile(initial.transcriptPath);
       buffer.current=[];buffered.current=0;sequence.current=0;pending.current=0;
       uploads.current=Promise.resolve();failure.current=null;stopped.current=false;
@@ -90,7 +96,7 @@ export function MeetingNotes({ sessionId }: { sessionId: string }) {
       };
       const silent=audio.createGain();silent.gain.value=0;
       source.connect(node);node.connect(silent);silent.connect(audio.destination);
-      setRecording(true);setOpen(true);
+      setRecording(true);
     }catch(e){
       setError((e as Error).message);stopped.current=true;
       processor.current?.disconnect();processor.current=null;
@@ -98,7 +104,7 @@ export function MeetingNotes({ sessionId }: { sessionId: string }) {
       await context.current?.close().catch(()=>{});context.current=null;
       if(created.current) {await api.stopMeeting(sessionId,false).catch(()=>{});created.current=false;}
       await holdDesktopCapture("meeting:"+sessionId,false);
-    }finally{setBusy(false);}
+    }finally{starting.current=false;if(mounted.current)setBusy(false);}
   },[sessionId,enqueue]);
 
   useEffect(()=>{
@@ -117,18 +123,39 @@ export function MeetingNotes({ sessionId }: { sessionId: string }) {
     },2000);
     return()=>{cancelled=true;clearInterval(timer);};
   },[recording,sessionId]);
-  useEffect(()=>()=>{void stop();},[stop]);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;void stop();};},[stop]);
+  useEffect(()=>{
+    let cancelled=false;
+    void api.meetingStatus(sessionId,record).then(value=>{
+      if(cancelled)return;
+      setSnapshot(value);setFile(value.transcriptPath||"");
+      setOwnedElsewhere(value.recording===true);
+    },e=>{if(!cancelled)setError(e.message);});
+    return()=>{cancelled=true;};
+  },[sessionId,record]);
+  useEffect(()=>{
+    const key=`yulify.meeting.start.${sessionId}`;
+    let pending=false;
+    try { pending=sessionStorage.getItem(key)==="1"; } catch { return; }
+    if(record || !snapshot || !pending)return;
+    const timer=window.setTimeout(()=>{
+      try { if(sessionStorage.getItem(key)!=="1")return;sessionStorage.removeItem(key); } catch { return; }
+      if(!snapshot.recording)void start();
+    },0);
+    return()=>window.clearTimeout(timer);
+  },[sessionId,record,snapshot,start]);
 
-  return <span className="relative inline-flex items-center gap-1">
-    <button type="button" className="prompt-action" aria-pressed={recording}
+  return <section className="rounded-xl border border-line bg-surface p-4" aria-label="Meeting notes">
+    <div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-medium">{snapshot?.title || "Meeting notes"}</h3><p className="text-xs text-fg-muted">{busy?"Processing":recording?"Recording":snapshot?.status||"Ready"}</p></div>
+    {!record && <button type="button" className="inline-flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-fg/5 disabled:opacity-50" aria-pressed={recording}
       aria-label={recording?"Stop meeting notes":"Start meeting notes"}
       title={recording?"Stop recording and summarize":"Record a meeting with timestamped speaker labels"}
-      disabled={busy} onClick={()=>void(recording?stop():start())}>
+      disabled={busy||ownedElsewhere} onClick={()=>void(recording?stop():start())}>
       {busy?<LuLoaderCircle aria-hidden className="animate-spin"/>:<LuNotebookPen aria-hidden color={recording?"var(--danger, #e5484d)":undefined}/>}
-    </button>
-    {(snapshot || error)&&<button type="button" className="text-xs text-fg-muted" onClick={()=>setOpen(v=>!v)} aria-expanded={open} aria-label="Show meeting transcript">{recording?"Recording":"Notes"}</button>}
-    {open&&<section className="absolute bottom-full right-0 z-30 mb-3 w-96 max-w-[85vw] rounded-xl border border-line bg-surface p-4 shadow-pop" aria-label="Meeting transcript">
-      <div className="flex justify-between gap-3 text-sm font-medium"><span>Meeting notes · {busy?"Processing":snapshot?.status||"Idle"}</span><button type="button" onClick={()=>setOpen(false)} aria-label="Close meeting transcript">×</button></div>
+      {recording?"Stop and summarize":"Start recording"}
+    </button>}
+    </div>
+      {ownedElsewhere&&<p className="mt-2 text-xs text-warn">This meeting is already recording in another view. Return there to stop it.</p>}
       <p className="my-2 text-xs text-fg-muted">Audio is saved before transcription and grouped into 3-minute WAV files with transcript and summary notes. Speaker numbers apply to this recording.</p>
       {error&&<p role="alert" className="mb-2 text-xs text-danger">{error}</p>}
       {snapshot?.audio_saved&&<p role="status" className="my-2 text-xs text-fg-muted">Audio saved: {time(snapshot.recorded_seconds||0)} · {snapshot.parts?.length||0} part(s)</p>}
@@ -137,7 +164,8 @@ export function MeetingNotes({ sessionId }: { sessionId: string }) {
         {snapshot?.turns.map(turn=><p key={turn.id} className="text-xs"><span className="text-fg-muted">[{time(turn.start)}–{time(turn.end)}] {turn.speaker}{turn.overlap?" · overlap":""}: </span>{turn.text}</p>)}
         {!snapshot?.turns.length&&<p className="text-xs text-fg-muted">{recording?"Listening… speech appears after a pause.":"No transcript yet."}</p>}
       </div>
+      {snapshot?.summary_status&&<p className="mt-2 text-xs text-fg-muted">Summary: {snapshot.summary_status}{snapshot.summary_error?` · ${snapshot.summary_error}`:""}</p>}
+      {record && snapshot?.summary_text&&<p className="mt-2 whitespace-pre-wrap text-sm">{snapshot.summary_text}</p>}
       {file&&<p className="mt-3 break-all text-xs text-fg-muted">Saved in Files: {file}</p>}
-    </section>}
-  </span>;
+  </section>;
 }

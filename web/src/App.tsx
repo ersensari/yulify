@@ -4,7 +4,7 @@ import { LuMenu, LuX } from "react-icons/lu";
 import { appendLiveEvents, resetLiveEvents } from "./live-events";
 import { fillFrom } from "./editor-fills";
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, SIGNED_OUT, type PortalEvent, type Session, type SessionStatus } from "./api";
 import { DialogFailed, ErrorBoundary } from "./components/ErrorBoundary";
 import { Sidebar } from "./components/Sidebar";
@@ -40,6 +40,7 @@ const AuditPage = lazyComponent(() => import("./components/AuditPanel"), "AuditP
 const BrowserPage = lazyComponent(() => import("./components/BrowserPage"), "BrowserPage");
 const MemoryPage = lazyComponent(() => import("./components/MemoryPage"), "MemoryPage");
 const ImagesPage = lazyComponent(() => import("./components/ImagesPage"), "ImagesPage");
+const MeetingsPage = lazyComponent(() => import("./components/MeetingsPage"), "MeetingsPage");
 const ConfigModal = lazyComponent(() => import("./components/ConfigModal"), "ConfigModal");
 const SetupAssistant = lazyComponent(() => import("./components/SetupAssistant"), "SetupAssistant");
 
@@ -129,6 +130,8 @@ export default function App() {
       <Route path="/browser" element={<Shell view="browser" />} />
       <Route path="/memory" element={<Shell view="memory" />} />
       <Route path="/images" element={<Shell view="images" />} />
+      <Route path="/meetings" element={<Shell view="meetings" />} />
+      <Route path="/meetings/:sessionId" element={<Shell view="meetings" />} />
       <Route path="/audit" element={<Shell view="audit" />} />
       <Route path="/s/:sessionId" element={<Shell />} />
       <Route path="/s/:sessionId/settings" element={<Shell settings />} />
@@ -149,10 +152,11 @@ function Shell({
   view = "chat",
 }: {
   settings?: boolean;
-  view?: "chat" | "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit";
+  view?: "chat" | "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit" | "meetings";
 }) {
   const { sessionId, tab } = useParams<{ sessionId?: string; tab?: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [mobileNav, setMobileNav] = useState(false);
   useEffect(() => { setMobileNav(false); }, [sessionId, view, settings]);
   // The drawer covers the page and keeps the keyboard; widened to a window with the sidebar in place, it is only the sidebar.
@@ -732,7 +736,9 @@ function Shell({
         {/* One page failing to draw takes down that page, not the portal. */}
         <ErrorBoundary resetKey={`${view}:${sessionId ?? ""}`}>
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-fg-subtle">{t("Loading…")}</div>}>
-        {view === "sessions" ? (
+        {view === "meetings" && !sessionId ? (
+          <MeetingsPage onOpen={(id, record) => navigate(`/meetings/${id}${record ? `?record=${encodeURIComponent(record)}` : ""}`)} onCreated={refreshSessions} />
+        ) : view === "sessions" ? (
           <SessionsPage
             sessions={sessions}
             places={places}
@@ -771,6 +777,8 @@ function Shell({
         ) : active ? (
           <Chat
             session={active}
+            meeting={view === "meetings"}
+            meetingRecord={view === "meetings" ? new URLSearchParams(location.search).get("record") || undefined : undefined}
             events={loadedSession === active.id ? events : []}
             loading={loadedSession !== active.id}
             hasEarlier={loadedSession === active.id && moreBefore}
